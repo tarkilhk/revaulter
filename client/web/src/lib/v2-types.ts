@@ -175,6 +175,8 @@ export type V2LoginBeginResponse = {
 }
 
 export type V2LoginFinishResponse = {
+    unlockLeaseId?: string
+    unlockLeaseExpiresAt?: number
     keyProtection: KeyProtection
     authenticated: boolean
     session?: V2AuthSessionInfo

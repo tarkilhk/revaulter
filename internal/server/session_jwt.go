@@ -1,10 +1,12 @@
 package server
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,10 +28,13 @@ const (
 )
 
 type authSessionToken struct {
-	UserID      string
-	DisplayName string
-	Ready       bool
-	ExpiresAt   time.Time
+	SessionID            string
+	VerifiedCredentialID string
+	VerifiedAt           int64
+	UserID               string
+	DisplayName          string
+	Ready                bool
+	ExpiresAt            time.Time
 }
 
 func newAuthSessionToken(user *db.User, ttl time.Duration) (*authSessionToken, error) {
@@ -38,6 +43,7 @@ func newAuthSessionToken(user *db.User, ttl time.Duration) (*authSessionToken, e
 	}
 
 	return &authSessionToken{
+		SessionID:   rand.Text(),
 		UserID:      user.ID,
 		DisplayName: user.DisplayName,
 		Ready:       user.Ready,
@@ -53,6 +59,9 @@ func signAuthSessionToken(sess *authSessionToken) (string, error) {
 		Claim(sessionClaimUserID, sess.UserID).
 		Claim(sessionClaimDisplayName, sess.DisplayName).
 		Claim(sessionClaimReady, sess.Ready).
+		Claim("sessionId", sess.SessionID).
+		Claim("verifiedCredentialId", sess.VerifiedCredentialID).
+		Claim("verifiedAt", strconv.FormatInt(sess.VerifiedAt, 10)).
 		Build()
 	if err != nil {
 		return "", err
@@ -91,12 +100,29 @@ func parseAuthSessionToken(token string) (*authSessionToken, error) {
 		return nil, err
 	}
 
+	sessionID, err := jwt.Get[string](parsed, "sessionId")
+	if err != nil || sessionID == "" {
+		return nil, errors.New("session missing identity")
+	}
+	credentialID, err := jwt.Get[string](parsed, "verifiedCredentialId")
+	if err != nil {
+		return nil, err
+	}
+	verifiedAtText, err := jwt.Get[string](parsed, "verifiedAt")
+	if err != nil {
+		return nil, err
+	}
+	verifiedAt, err := strconv.ParseInt(verifiedAtText, 10, 64)
+	if err != nil {
+		return nil, err
+	}
 	expiresAt, ok := parsed.Expiration()
 	if !ok {
 		return nil, errors.New("session token missing expiration")
 	}
 
 	return &authSessionToken{
+		SessionID: sessionID, VerifiedCredentialID: credentialID, VerifiedAt: verifiedAt,
 		UserID:      userID,
 		DisplayName: displayName,
 		Ready:       ready,
@@ -115,6 +141,7 @@ func setSessionCookie(c *gin.Context, sess *authSessionToken) error {
 		return err
 	}
 
+	c.Set(contextKeySessionDigest, approvalDigest(token))
 	cookieName, cookiePath := sessionCookieFor(c)
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(cookieName, token, int(ttl.Seconds()), cookiePath, "", secureCookie(c), true)

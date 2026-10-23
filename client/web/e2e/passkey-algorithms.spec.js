@@ -112,7 +112,7 @@ for (const algorithmName of ALGORITHMS) {
 
                 // The CLI is compiled on first use, which can take longer than the default expect timeout
                 await expect(page.getByText(`approval with ${algorithm.name}`)).toBeVisible({ timeout: 60_000 })
-                await page.getByRole('button', { name: 'Verify and confirm' }).click()
+                await page.getByRole('button', { name: 'Approve' }).click()
 
                 const encryptResult = await encryptRun.done
                 expect(encryptResult.json.kind).toBe('revaulter/1')

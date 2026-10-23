@@ -45,9 +45,13 @@ interface Props {
     onUnpublishSigningKey: (id: string) => Promise<void>
     onUpdateAllowedIps: () => Promise<void>
     onUpdateDisplayName: (name: string) => Promise<void>
+    unlockExpiresAt: number
     pageError: string | null
     pendingItems: V2PendingRequestItem[]
-    withApprovalKey: <T>(state: string, use: (key: Uint8Array, grant: string) => Promise<T>) => Promise<T>
+    withApprovalKey: <T>(
+        state: string,
+        use: (key: Uint8Array, grant: string, assertActive: () => void) => Promise<T>
+    ) => Promise<T>
     requestKey: string
     requestKeyEnabled: boolean
     requestOidcEnabled: boolean
@@ -87,6 +91,7 @@ let {
     onUnpublishSigningKey,
     onUpdateAllowedIps,
     onUpdateDisplayName,
+    unlockExpiresAt,
     pageError,
     pendingItems,
     withApprovalKey,
@@ -113,7 +118,7 @@ let bulkActionId = 0
 $effect(() => {
     const id = setInterval(() => {
         now = Date.now()
-    }, 5000)
+    }, 1000)
     return () => clearInterval(id)
 })
 
@@ -143,6 +148,13 @@ function rejectAll() {
             <p class="text-sm text-neutral-500 dark:text-neutral-400">
                 Review inbound encrypt, decrypt, and signing requests for
                 <span class="mono text-neutral-900 dark:text-neutral-100">{sessionLabel}</span>.
+            </p>
+            <p class="mt-2 text-sm text-neutral-600 dark:text-neutral-300">
+                {#if unlockExpiresAt > now}
+                    Unlocked in this tab for {Math.ceil((unlockExpiresAt - now) / 1000)} seconds. Each request needs your approval.
+                {:else}
+                    This tab is locked. Approve a request to verify your passkey and unlock it.
+                {/if}
             </p>
         </div>
 

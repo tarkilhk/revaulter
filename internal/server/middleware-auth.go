@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	contextKeySessionDigest   = "SessionDigest"
+	contextKeyVerifiedSession = "VerifiedSession"
 	contextKeySessionTTL      = "SessionTTL"
 	sessionCookieNameSecure   = "__Host-_s"
 	sessionCookieNameInsecure = "_s"
@@ -71,6 +73,8 @@ func (s *Server) MiddlewareSession(requireReady bool) gin.HandlerFunc {
 		ttl := int(max(time.Until(sess.ExpiresAt), 0).Seconds())
 		c.Set(contextKeySessionTTL, ttl)
 		c.Set(contextKeyUserID, sess.UserID)
+		c.Set(contextKeySessionDigest, approvalDigest(token))
+		c.Set(contextKeyVerifiedSession, sess)
 	}
 }
 

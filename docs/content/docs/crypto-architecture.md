@@ -73,8 +73,7 @@ Despite all possible mitigations, there is still a residual risk inherent with t
 ## Primary key lifecycle
 
 The `primaryKey` is the root secret for a user account.
-This fork requires a fresh local WebAuthn ceremony with user verification and PRF for every approval; a login session caches only encrypted key wrappers and public credential metadata, never an unlocked primary key.
-Each action uses a random 32-byte challenge, a fixed credential and RP, and session/credential checks before and after user verification.
+A server-verified WebAuthn ceremony with required user verification can unlock the current tab for at most two minutes. Only the primary key is retained in tab RAM; passwords, PRF output and anchor keys are released after unlocking. The fixed deadline starts at verification and is never extended by request approvals. Expiry, logout, navigation and approval failures clear the retained key. Persistent browser storage contains only encrypted wrappers and public credential metadata.
 Only the public PRF capability bit may be serialized into credentials sent to the server, never PRF results.
 JavaScript and WebCrypto do not provide guaranteed physical memory erasure.
 It is generated once in the browser during setup and reused across passkeys by re-wrapping it for each credential.
@@ -117,7 +116,7 @@ The existing Argon2id implementation stretches that secret with a fresh 16-byte 
 
 Version-1 PRF envelopes and their derivation remain unchanged. The server stores each credential's mode at registration and rejects a mismatched wrapper on signup, addition or update. There is no automatic downgrade on missing PRF output. The Bitwarden secret is an encryption factor, not a server password: no plaintext or password verifier is transmitted. A stolen secret plus wrapper permits offline decryption; server-verified WebAuthn is authorization, not an additional cryptographic wrapping factor in this mode.
 
-Each approval starts with a fresh server challenge. The resulting two-minute grant binds the owner, credential/public key, both key epochs and the exact pending request. Grant consumption, live revocation checks and response insertion are atomic. Credential addition carries the approving identity into the registration challenge and rechecks it at finish. Browser code retains only encrypted wrappers between operations.
+A verified ceremony issues a session-bound unlock lease with an absolute two-minute deadline. Each explicit request approval obtains a separate one-use grant binding the owner, credential/public key, both key epochs and exact pending request. Grants cannot outlive the lease; confirmation rechecks its session, expiry and live identity in the same transaction as grant consumption and response insertion. Sensitive settings changes retain fresh verification. Credential addition carries the approving identity into the registration challenge and rechecks it at finish.
 
 ### Without a password
 

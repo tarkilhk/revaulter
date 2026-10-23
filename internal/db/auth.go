@@ -1041,3 +1041,26 @@ func (s *AuthStore) LockApprovalIdentity(ctx context.Context, userID, credential
 	}
 	return nil
 }
+
+// ReadUnlockLease locks a live lease without extending or consuming it
+func (s *AuthStore) ReadUnlockLease(ctx context.Context, id, userID, sessionDigest string, out any) error {
+	if !s.db.IsTransaction() {
+		panic("ReadUnlockLease requires a transaction")
+	}
+	var payload string
+	err := s.db.QueryRow(ctx, `UPDATE v2_auth_challenges SET challenge=challenge
+ WHERE id=$1 AND kind='unlock-lease' AND user_id=$2 AND challenge=$3 AND used_at IS NULL AND expires_at>$4
+ RETURNING (SELECT session_data FROM v2_auth_challenge_payloads WHERE challenge_id=v2_auth_challenges.id)`, id, userID, sessionDigest, time.Now().Unix()).Scan(&payload)
+	if s.db.IsNoRowsError(err) {
+		return ErrInvalidChallenge
+	}
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(payload), out)
+}
+
+func (s *AuthStore) RevokeUnlockLeases(ctx context.Context, userID, sessionDigest string) error {
+	_, err := s.db.Exec(ctx, `UPDATE v2_auth_challenges SET used_at=$1 WHERE kind='unlock-lease' AND user_id=$2 AND challenge=$3 AND used_at IS NULL`, time.Now().Unix(), userID, sessionDigest)
+	return err
+}

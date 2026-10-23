@@ -38,11 +38,13 @@ import {
 } from '$lib/crypto-anchor'
 import { type WrappedKeyCache, withFreshKeys } from '$lib/fresh-unlock'
 import { ResponseNotOkError } from '$lib/request'
+import { createUnlockWindow, type UnlockLease } from '$lib/unlock-window'
 import { base64UrlToBytes, bytesToBase64Url } from '$lib/utils'
 import {
     v2AddCredentialBegin,
     v2AddCredentialFinish,
     v2AddRequestOIDCIssuer,
+    v2ApprovalGrant,
     v2CreateSigningKey,
     v2DeleteCredential,
     v2DeleteRequestOIDCIssuer,
@@ -76,6 +78,7 @@ import type {
     V2SessionResponse,
 } from '$lib/v2-types'
 import { PrfUnavailableError, webauthnLoginWithPrf, webauthnRegister } from '$lib/webauthn'
+import { loadWrappedKey, saveWrappedKey } from '$lib/wrapped-key-storage'
 
 type UIState = 'boot' | 'signin' | 'signup' | 'password-login' | 'password-setup' | 'ready'
 
@@ -89,6 +92,7 @@ const prfHelpHref = 'https://revaulter.italypaleale.me/docs/what-is-revaulter/#s
 let uiState = $state<UIState>('boot')
 let serverVersion = $state<string | null>(null)
 let authBusy = $state(false)
+let signingOut = $state(false)
 let authError = $state<string | null>(null)
 let pageError = $state<string | null>(null)
 let signupDisabled = $state(false)
@@ -132,9 +136,18 @@ let stopStream: (() => Promise<void>) | null = null
 let awaitingReadySessionRefresh = $state(false)
 
 onMount(() => {
+    const lockTab = () => unlockWindow.clear()
+    const checkUnlockDeadline = () => {
+        unlockWindow.get()
+    }
+    window.addEventListener('pagehide', lockTab)
+    document.addEventListener('visibilitychange', checkUnlockDeadline)
     void initialize()
     return () => {
         teardownListStream()
+        unlockWindow.clear()
+        window.removeEventListener('pagehide', lockTab)
+        document.removeEventListener('visibilitychange', checkUnlockDeadline)
     }
 })
 
@@ -149,16 +162,41 @@ async function initialize() {
             return
         }
 
-        await v2Session()
-
-        // While sessions could survive page reloads, but the PRF secret is intentionally kept in memory only
-        // We remove the session state too
+        const active = await v2Session()
+        const cache = loadWrappedKey()
+        if (active.authenticated && cache?.userId === active.userId) {
+            const credentials = await v2ListCredentials()
+            const credential = credentials.find((item) => item.credentialId === cache.credentialId)
+            if (
+                credential &&
+                credential.keyProtection === cache.keyProtection &&
+                credential.wrappedKeyEpoch === cache.wrappedKeyEpoch &&
+                !credential.wrappedKeyStale
+            ) {
+                let envelope: ReturnType<typeof parseWrappedPrimaryKeyEnvelope>
+                try {
+                    envelope = parseWrappedPrimaryKeyEnvelope(cache.wrappedPrimaryKey!)
+                } catch (err) {
+                    clearLocalAuthState()
+                    throw err
+                }
+                session = active
+                wrappedKeyCache = cache
+                keyProtection = cache.keyProtection
+                sessionCredentialId = cache.credentialId
+                sessionCredentialWrappedKeyEpoch = cache.wrappedKeyEpoch
+                hasPassword = envelope.passwordRequired
+                enterReadyView()
+                return
+            }
+        }
         clearLocalAuthState()
-        authError = 'Session exists but local key material is missing. Sign in again to continue.'
+        authError = 'Sign in to refresh the encrypted keys saved in this browser.'
         uiState = 'signin'
     } catch (err) {
         if (err instanceof ResponseNotOkError) {
             if (err.statusCode === 401) {
+                clearLocalAuthState()
                 uiState = 'signin'
                 return
             }
@@ -193,6 +231,12 @@ function toSessionResponse(authSession: V2AuthSessionInfo): V2SessionResponse {
     }
 }
 
+let unlockExpiresAt = $state(0)
+const unlockWindow = createUnlockWindow((expiresAt) => {
+    unlockExpiresAt = expiresAt
+})
+let pendingUnlockLease: UnlockLease | null = null
+
 let keyOperationBusy = false
 let keyOperationEpoch = 0
 let passwordPrompt = $state<((value: string | null) => void) | null>(null)
@@ -214,6 +258,9 @@ async function withFreshLocalKeys<T>(
 ): Promise<T> {
     if (keyOperationBusy || !session || !sessionCredentialId || !wrappedKeyCache) {
         throw new Error('Finish the current verification before starting another action')
+    }
+    if (!requestState) {
+        unlockWindow.clear()
     }
     keyOperationBusy = true
     const operationEpoch = keyOperationEpoch
@@ -249,9 +296,16 @@ async function withFreshLocalKeys<T>(
                 prfSecret = keys.prfSecret ?? null
                 sessionAnchor = keys.anchor
                 sessionPassword = keys.password ?? null
-                return await use(keys.approvalGrant)
+                const result = await use(keys.approvalGrant)
+                if (requestState && operationEpoch === keyOperationEpoch && session?.userId === expectedUserId) {
+                    unlockWindow.set(keys.primaryKey, keys)
+                }
+                return result
             },
         })
+    } catch (err) {
+        unlockWindow.clear()
+        throw err
     } finally {
         passwordPrompt = null
         clearUnlockedKeys()
@@ -259,13 +313,44 @@ async function withFreshLocalKeys<T>(
     }
 }
 
-async function withApprovalKey<T>(state: string, use: (key: Uint8Array, grant: string) => Promise<T>): Promise<T> {
-    return await withFreshLocalKeys(async (grant) => {
-        if (!primaryKey) {
-            throw new Error('Fresh passkey verification did not unlock a key')
+async function withApprovalKey<T>(
+    state: string,
+    use: (key: Uint8Array, grant: string, assertActive: () => void) => Promise<T>
+): Promise<T> {
+    const unlocked = unlockWindow.get()
+    if (!unlocked) {
+        return await withFreshLocalKeys(async (grant) => {
+            if (!primaryKey) {
+                throw new Error('Passkey verification did not unlock a key')
+            }
+            const epoch = keyOperationEpoch
+            return await use(primaryKey, grant, () => {
+                if (epoch !== keyOperationEpoch || !session || uiState !== 'ready') {
+                    throw new Error('The approval session ended')
+                }
+            })
+        }, state)
+    }
+    if (keyOperationBusy || !session || !wrappedKeyCache) {
+        throw new Error('Finish the current approval before starting another action')
+    }
+    keyOperationBusy = true
+    const operationEpoch = keyOperationEpoch
+    try {
+        const grant = await v2ApprovalGrant(unlocked.leaseId, state)
+        const assertActive = () => {
+            if (operationEpoch !== keyOperationEpoch || unlockWindow.get() !== unlocked || uiState !== 'ready') {
+                throw new Error('Unlock expired. Approve again to unlock this tab.')
+            }
         }
-        return await use(primaryKey, grant)
-    }, state)
+        assertActive()
+        return await use(unlocked.primaryKey, grant.grantId, assertActive)
+    } catch (err) {
+        unlockWindow.clear()
+        throw err
+    } finally {
+        keyOperationBusy = false
+    }
 }
 
 function answerPasswordPrompt(value: string | null) {
@@ -288,6 +373,8 @@ async function teardownListStream() {
 }
 
 function clearLocalAuthState() {
+    unlockWindow.clear()
+    pendingUnlockLease = null
     passwordInput = ''
     keyOperationEpoch += 1
     answerPasswordPrompt(null)
@@ -295,6 +382,7 @@ function clearLocalAuthState() {
     void teardownListStream()
     session = null
     wrappedKeyCache = null
+    saveWrappedKey(null)
     prfSecret = null
     primaryKey = null
     sessionAnchor = null
@@ -312,7 +400,12 @@ function clearLocalAuthState() {
 }
 
 function enterReadyView() {
+    if (primaryKey && pendingUnlockLease) {
+        unlockWindow.set(primaryKey, pendingUnlockLease)
+    }
+    pendingUnlockLease = null
     clearUnlockedKeys()
+    saveWrappedKey(wrappedKeyCache)
     uiState = 'ready'
     passwordInput = ''
     authError = null
@@ -391,6 +484,7 @@ async function beginPasskeyLoginStep(): Promise<'authenticated' | 'password-requ
             throw new Error(missingPrfError)
         }
 
+        pendingUnlockLease = finish
         session = toSessionResponse(finish.session)
         if (assertion.prfSecret) {
             setPrfSecret(assertion.prfSecret)
@@ -620,6 +714,7 @@ async function doFinishPasswordLogin() {
         await unlockWithPassword(passwordInput)
         enterReadyView()
     } catch (err) {
+        unlockWindow.clear()
         // Keep only the initial PRF factor while the user retries this login password
         // Partially decrypted primary/anchor material must never survive an error
         primaryKey?.fill(0)
@@ -756,6 +851,7 @@ async function doSetPassword() {
             attestationSignatureEs384: attestSig.sigEs384,
             attestationSignatureMldsa87: attestSig.sigMldsa87,
         })
+        pendingUnlockLease = finalize
         if (finalize.session) {
             session = toSessionResponse(finalize.session)
         }
@@ -792,18 +888,21 @@ async function doSetPassword() {
 }
 
 async function doLogout() {
-    void teardownListStream()
-    try {
-        await v2Logout()
-    } catch {
-        // Ignore logout failures and still clear the local session state.
-    }
-
     clearLocalAuthState()
     items = {}
     passwordInput = ''
     authError = null
     uiState = 'signin'
+    signingOut = true
+    authBusy = true
+    try {
+        await v2Logout()
+    } catch {
+        // Local keys and approval state are already cleared even if the network fails
+    } finally {
+        signingOut = false
+        authBusy = false
+    }
 }
 
 const parseAllowedIpsInput = (raw: string) =>
@@ -1321,6 +1420,7 @@ async function doChangePasswordUnlocked(password: string, grant: string) {
             wrappedAnchorKey: wrappedAnchor,
             wrappedKeyEpoch: session.wrappedKeyEpoch,
         }
+        saveWrappedKey(wrappedKeyCache)
         sessionCredentialWrappedKeyEpoch = session.wrappedKeyEpoch
         await doLoadCredentials()
         hasPassword = !!password
@@ -1460,6 +1560,7 @@ function sortedItems() {
             onUpdateDisplayName={doUpdateDisplayName}
             pageError={pageError}
             pendingItems={sortedItems()}
+            unlockExpiresAt={unlockExpiresAt}
             withApprovalKey={withApprovalKey}
             requestKey={session?.requestKey ?? ''}
             requestKeyEnabled={session?.requestKeyEnabled ?? true}
@@ -1498,6 +1599,7 @@ function sortedItems() {
         />
     {:else}
         <AuthAccessView
+            signingOut={signingOut}
             {keyProtection}
             authBusy={authBusy}
             authError={authError}

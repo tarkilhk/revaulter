@@ -44,6 +44,7 @@ test('explicit Bitwarden signup, fresh ordinary passkeys, local secret and cance
         await page.getByRole('button', { name: 'Finish setup' }).click()
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
         const session = await (await page.request.get('/v2/auth/session')).json()
+        await page.reload()
         await waitForListStream(page)
         await page.evaluate(() => {
             const original = navigator.credentials.get.bind(navigator.credentials)
@@ -65,7 +66,7 @@ test('explicit Bitwarden signup, fresh ordinary passkeys, local secret and cance
             value: 'dummy plaintext',
         })
         await expect(page.getByText('Bitwarden first dummy')).toBeVisible({ timeout: 30_000 })
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
         await expect(page.getByRole('dialog')).toBeVisible()
         await page.getByLabel('Unlock secret', { exact: true }).fill(secret)
         await page.getByRole('button', { name: 'Continue', exact: true }).click()
@@ -80,6 +81,19 @@ test('explicit Bitwarden signup, fresh ordinary passkeys, local secret and cance
         expect(JSON.parse(confirmed[0].body).approvalGrant).toBeTruthy()
         expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain(secret)
 
+        await page.reload()
+        await waitForListStream(page)
+        await page.evaluate(() => {
+            const original = navigator.credentials.get.bind(navigator.credentials)
+            window.approvalOptions = []
+            navigator.credentials.get = async (options) => {
+                window.approvalOptions.push({
+                    uv: options.publicKey.userVerification,
+                    prf: !!options.publicKey.extensions?.prf,
+                })
+                return original(options)
+            }
+        })
         pending = startCLIRequest({
             operation: 'encrypt',
             requestKey: session.requestKey,
@@ -90,7 +104,7 @@ test('explicit Bitwarden signup, fresh ordinary passkeys, local secret and cance
         })
         pendingDone = pending.done.catch(() => null)
         await expect(page.getByText('Bitwarden canceled dummy')).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
         await expect(page.getByRole('dialog')).toBeVisible()
         expect(await page.getByLabel('Unlock secret', { exact: true }).inputValue()).toBe('')
         await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
@@ -98,7 +112,7 @@ test('explicit Bitwarden signup, fresh ordinary passkeys, local secret and cance
         expect(
             sent.filter((request) => request.url.endsWith('/v2/api/confirm') && JSON.parse(request.body).confirm)
         ).toHaveLength(1)
-        expect(await page.evaluate(() => window.approvalOptions)).toHaveLength(2)
+        expect(await page.evaluate(() => window.approvalOptions)).toHaveLength(1)
         // Returning login uses the stored explicit mode, never local registration state
         await page.getByRole('button', { name: 'Sign out' }).click()
         await page.getByRole('button', { name: 'Continue with passkey' }).click()
@@ -208,9 +222,8 @@ test('an existing PRF account adds Bitwarden and both modes decrypt the same pri
             value: 'shared dummy plaintext',
         })
         await expect(page.getByText('mixed Bitwarden encrypt')).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
-        await page.getByLabel('Unlock secret', { exact: true }).fill(secret)
-        await page.getByRole('button', { name: 'Continue', exact: true }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
+        await expect(page.getByRole('dialog')).toHaveCount(0)
         const encrypted = (await encryption.done).json
         // Add the opposite mode while authenticated with Bitwarden as well
         const addedPrfId = await manager.addAuthenticator({ hasPrf: true })
@@ -249,7 +262,7 @@ test('an existing PRF account adds Bitwarden and both modes decrypt the same pri
             aad: encrypted.additionalData,
         })
         await expect(page.getByText('mixed PRF decrypt')).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
         expect((await decryption.done).json.decodedValue).toBe('shared dummy plaintext')
         await signOutThroughUI(page)
         await signInWithAuthenticator(page, manager, prfId)

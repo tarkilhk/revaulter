@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -58,7 +59,9 @@ func approvalCall(t *testing.T, handler gin.HandlerFunc, body any) (int, map[str
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(encoded))
 	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("location", &url.URL{Scheme: "https", Host: "example.com"})
 	c.Set(contextKeyUserID, "approval-user")
+	c.Set(contextKeySessionDigest, "test-session-digest")
 	handler(c)
 	var result map[string]any
 	err = json.Unmarshal(w.Body.Bytes(), &result)
@@ -89,6 +92,7 @@ func TestApprovalServerChallengeAndSingleUseGrant(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, code)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	c.Set(contextKeySessionDigest, "test-session-digest")
 	_, err := db.ExecuteInTransaction(t.Context(), s.db, time.Second, func(ctx context.Context, tx *db.DbTx) (any, error) {
 		return s.consumeApprovalGrant(c, tx, "another-user", grant, "", "update-wrapped-key", id)
 	})
@@ -173,7 +177,7 @@ func TestApprovalRejectsMissingUVWithValidSignature(t *testing.T) {
 }
 
 // Existing business-logic tests seed a grant explicitly; ceremony tests above exercise actual signed assertions
-func seedTestApprovalGrant(t *testing.T, s *Server, userID, state, action, credentialID string) string {
+func seedTestApprovalGrant(t *testing.T, s *Server, userID, state, action, credentialID, sessionToken string) string {
 	t.Helper()
 	id, err := db.ExecuteInTransaction(t.Context(), s.db, time.Second, func(ctx context.Context, tx *db.DbTx) (string, error) {
 		if credentialID == "" {
@@ -190,7 +194,15 @@ func seedTestApprovalGrant(t *testing.T, s *Server, userID, state, action, crede
 		if err != nil {
 			return "", err
 		}
-		grant, err := tx.AuthStore().BeginChallenge(ctx, "approval-grant", userID, "test-only-grant", time.Now().Add(approvalTTL), binding)
+		leaseID := ""
+		if state != "" {
+			lease, leaseErr := s.issueUnlockLease(ctx, tx, userID, credentialID, approvalDigest(sessionToken), time.Now())
+			if leaseErr != nil {
+				return "", leaseErr
+			}
+			leaseID = lease.ID
+		}
+		grant, err := tx.AuthStore().BeginChallenge(ctx, "approval-grant", userID, "test-only-grant", time.Now().Add(approvalTTL), approvalGrant{Binding: binding, LeaseID: leaseID})
 		if err != nil {
 			return "", err
 		}
@@ -221,6 +233,7 @@ func TestApprovalRequestGrantRejectsChangedBinding(t *testing.T) {
 			require.NoError(t, err)
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			c.Set(contextKeySessionDigest, "test-session-digest")
 			_, err = db.ExecuteInTransaction(t.Context(), s.db, time.Second, func(ctx context.Context, tx *db.DbTx) (any, error) {
 				return s.consumeApprovalGrant(c, tx, "approval-user", approvalTestString(t, finish["grantId"]), "approval-state", "", "")
 			})
@@ -233,7 +246,8 @@ func TestApprovalCredentialEnrollmentRejectsRevokedApprover(t *testing.T) {
 	s, _, id := approvalFixture(t)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
-	grant := seedTestApprovalGrant(t, s, "approval-user", "", "add-credential", id)
+	c.Set(contextKeySessionDigest, "test-session-digest")
+	grant := seedTestApprovalGrant(t, s, "approval-user", "", "add-credential", id, "")
 	begin, err := db.ExecuteInTransaction(t.Context(), s.db, time.Second, func(ctx context.Context, tx *db.DbTx) (addCredentialBeginRes, error) {
 		binding, err := s.consumeApprovalGrant(c, tx, "approval-user", grant, "", "add-credential", "")
 		if err != nil {
@@ -282,6 +296,7 @@ func TestApprovalConcurrentRequestCommit(t *testing.T) {
 	commit := func(state string) error {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+		c.Set(contextKeySessionDigest, "test-session-digest")
 		_, commitErr := db.ExecuteInTransaction(t.Context(), s.db, 5*time.Second, func(ctx context.Context, tx *db.DbTx) (any, error) {
 			_, consumeErr := s.consumeApprovalGrant(c, tx, "approval-user", grant, state, "", "")
 			if consumeErr != nil {

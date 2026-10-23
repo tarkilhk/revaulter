@@ -4,7 +4,7 @@ import { base64UrlToBytes } from '$lib/utils'
 import { v2ApprovalBegin, v2ApprovalFinish } from '$lib/v2-api'
 import { webauthnLoginWithPrf } from '$lib/webauthn'
 
-// Only ciphertext and public credential metadata may survive between actions
+// The persistent cache contains only ciphertext and public credential metadata
 export interface WrappedKeyCache {
     keyProtection: 'prf' | 'bitwarden'
     userId: string
@@ -19,13 +19,15 @@ export interface WrappedKeyCache {
 export interface FreshKeys {
     primaryKey: Uint8Array
     prfSecret: Uint8Array | undefined
+    unlockLeaseId?: string
+    unlockLeaseExpiresAt?: number
     approvalGrant: string
     anchor: AnchorKeyPair | null
     password: string | undefined
 }
 
 // Every invocation starts a new local, verified WebAuthn ceremony
-// There is deliberately no cache or already-unlocked path for plaintext keys
+// A request unlock window may separately own a bounded copy of the returned primary key
 export async function withFreshKeys<T>(args: {
     cache: WrappedKeyCache
     requestState?: string
@@ -96,7 +98,15 @@ export async function withFreshKeys<T>(args: {
                 userId: cache.userId,
             })
         }
-        return await args.use({ primaryKey, prfSecret, anchor, password, approvalGrant: finish.grantId })
+        return await args.use({
+            primaryKey,
+            prfSecret,
+            anchor,
+            password,
+            approvalGrant: finish.grantId,
+            unlockLeaseId: finish.unlockLeaseId,
+            unlockLeaseExpiresAt: finish.unlockLeaseExpiresAt,
+        })
     } finally {
         primaryKey?.fill(0)
         prfSecret?.fill(0)

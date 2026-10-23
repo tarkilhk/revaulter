@@ -88,7 +88,12 @@ export async function v2FinalizeSignup(args: {
     if (args.wrappedPrimaryKey) {
         body.wrappedPrimaryKey = args.wrappedPrimaryKey
     }
-    const res = await Request<{ ok: boolean; session?: V2AuthSessionInfo }>('/v2/auth/finalize-signup', {
+    const res = await Request<{
+        ok: boolean
+        session?: V2AuthSessionInfo
+        unlockLeaseId?: string
+        unlockLeaseExpiresAt?: number
+    }>('/v2/auth/finalize-signup', {
         postData: body,
     })
     return res.data
@@ -435,8 +440,16 @@ export async function v2ApprovalBegin(
 }
 
 export async function v2ApprovalFinish(challengeId: string, credential: unknown) {
-    const res = await Request<{ grantId: string }>('/v2/auth/approval/finish', {
-        postData: { challengeId, credential },
-    })
+    const res = await Request<{ grantId: string; unlockLeaseId?: string; unlockLeaseExpiresAt?: number }>(
+        '/v2/auth/approval/finish',
+        {
+            postData: { challengeId, credential },
+        }
+    )
+    return res.data
+}
+
+export async function v2ApprovalGrant(leaseId: string, state: string) {
+    const res = await Request<{ grantId: string }>('/v2/auth/approval/grant', { postData: { leaseId, state } })
     return res.data
 }

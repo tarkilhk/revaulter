@@ -96,6 +96,8 @@ type v2AuthLoginBeginResponse struct {
 }
 
 type v2AuthLoginFinishResponse struct {
+	unlockLeaseResponse
+
 	KeyProtection             string             `json:"keyProtection"`
 	Authenticated             bool               `json:"authenticated"`
 	Session                   *v2AuthSessionInfo `json:"session,omitempty"`
@@ -127,6 +129,8 @@ type v2AuthFinalizeSignupRequest struct {
 }
 
 type v2AuthFinalizeSignupResponse struct {
+	unlockLeaseResponse
+
 	OK      bool               `json:"ok"`
 	Session *v2AuthSessionInfo `json:"session,omitempty"`
 }
@@ -567,6 +571,11 @@ func (s *Server) RouteV2AuthLoginFinish(c *gin.Context) {
 		return
 	}
 
+	resp.unlockLeaseResponse, err = s.sessionUnlockLease(c, res.sess, res.binding)
+	if err != nil {
+		AbortWithErrorJSON(c, err)
+		return
+	}
 	logging.LogFromContext(c.Request.Context()).InfoContext(c.Request.Context(), logMsg,
 		slog.String("user_id", res.user.ID),
 		slog.String("client_ip", c.ClientIP()),
@@ -671,6 +680,14 @@ func (s *Server) RouteV2AuthFinalizeSignup(c *gin.Context) {
 		return
 	}
 
+	evidence, exists := c.Get(contextKeyVerifiedSession)
+	if exists {
+		verified, valid := evidence.(*authSessionToken)
+		if valid {
+			sess.VerifiedCredentialID = verified.VerifiedCredentialID
+			sess.VerifiedAt = verified.VerifiedAt
+		}
+	}
 	// Set the updated session cookie
 	err = setSessionCookie(c, sess)
 	if err != nil {
@@ -678,10 +695,16 @@ func (s *Server) RouteV2AuthFinalizeSignup(c *gin.Context) {
 		return
 	}
 
+	lease, err := s.sessionUnlockLease(c, sess, res.binding)
+	if err != nil {
+		AbortWithErrorJSON(c, err)
+		return
+	}
 	// Send the response
 	c.JSON(http.StatusOK, v2AuthFinalizeSignupResponse{
-		OK:      true,
-		Session: sessionInfoFromUser(res.user, int(max(time.Until(sess.ExpiresAt), 0).Seconds())),
+		unlockLeaseResponse: lease,
+		OK:                  true,
+		Session:             sessionInfoFromUser(res.user, int(max(time.Until(sess.ExpiresAt), 0).Seconds())),
 	})
 }
 
@@ -863,6 +886,11 @@ func (s *Server) RouteV2AuthSession(c *gin.Context) {
 // This is acceptable since most session tokens have a very short lifetime anyways
 func (s *Server) RouteV2AuthLogout(c *gin.Context) {
 	userID := c.GetString(contextKeyUserID)
+	err := s.db.AuthStore().RevokeUnlockLeases(c.Request.Context(), userID, c.GetString(contextKeySessionDigest))
+	if err != nil {
+		AbortWithErrorJSON(c, err)
+		return
+	}
 
 	logging.LogFromContext(c.Request.Context()).InfoContext(c.Request.Context(), "User logged out",
 		slog.String("user_id", userID),
@@ -1684,6 +1712,8 @@ func (s *Server) registerFinish(c *gin.Context, tx *db.DbTx, req v2AuthRegisterF
 		return registerFinishRes{}, err
 	}
 
+	sess.VerifiedCredentialID = base64.RawURLEncoding.EncodeToString(cred.ID)
+	sess.VerifiedAt = time.Now().Unix()
 	// Save the audit log entry
 	err = s.auditEventTx(c, tx, auditFields{
 		EventType:    db.AuditAuthRegisterFinish,
@@ -1703,9 +1733,10 @@ func (s *Server) registerFinish(c *gin.Context, tx *db.DbTx, req v2AuthRegisterF
 }
 
 type loginFinishRes struct {
-	user *db.User
-	sess *authSessionToken
-	cred *db.AuthCredentialRecord
+	binding *approvalBinding
+	user    *db.User
+	sess    *authSessionToken
+	cred    *db.AuthCredentialRecord
 }
 
 func (s *Server) loginFinish(c *gin.Context, tx *db.DbTx, req v2AuthLoginFinishRequest) (loginFinishRes, error) {
@@ -1742,6 +1773,14 @@ func (s *Server) loginFinish(c *gin.Context, tx *db.DbTx, req v2AuthLoginFinishR
 			return nil, NewResponseError(http.StatusUnauthorized, "Invalid login")
 		}
 
+		hErr = as.LockApprovalIdentity(ctx, user.ID, base64.RawURLEncoding.EncodeToString(rawID))
+		if hErr != nil {
+			return nil, hErr
+		}
+		user, hErr = as.GetUserByID(ctx, user.ID)
+		if hErr != nil {
+			return nil, hErr
+		}
 		userRecord, hErr := loadWebAuthnUser(ctx, as, user)
 		if hErr != nil {
 			return nil, hErr
@@ -1810,6 +1849,8 @@ func (s *Server) loginFinish(c *gin.Context, tx *db.DbTx, req v2AuthLoginFinishR
 		return loginFinishRes{}, err
 	}
 
+	sess.VerifiedCredentialID = credentialID
+	sess.VerifiedAt = time.Now().Unix()
 	// Save the audit log entry
 	err = s.auditEventTx(c, tx, auditFields{
 		EventType:    db.AuditAuthLoginFinish,
@@ -1823,10 +1864,19 @@ func (s *Server) loginFinish(c *gin.Context, tx *db.DbTx, req v2AuthLoginFinishR
 		return loginFinishRes{}, err
 	}
 
+	var binding *approvalBinding
+	if discoveredDBUser.Ready {
+		verified, bindErr := s.approvalIdentity(ctx, tx, discoveredDBUser.ID, credentialID, "", "")
+		if bindErr != nil {
+			return loginFinishRes{}, bindErr
+		}
+		binding = &verified
+	}
 	return loginFinishRes{
-		user: discoveredDBUser,
-		sess: sess,
-		cred: credRec,
+		binding: binding,
+		user:    discoveredDBUser,
+		sess:    sess,
+		cred:    credRec,
 	}, nil
 }
 
@@ -1872,7 +1922,8 @@ type finalizeSetupVals struct {
 }
 
 type finalizeSetupRes struct {
-	user *db.User
+	binding *approvalBinding
+	user    *db.User
 }
 
 func (s *Server) finalizeSetup(c *gin.Context, tx *db.DbTx, vals finalizeSetupVals) (finalizeSetupRes, error) {
@@ -1975,8 +2026,13 @@ func (s *Server) finalizeSetup(c *gin.Context, tx *db.DbTx, vals finalizeSetupVa
 		return finalizeSetupRes{}, err
 	}
 
+	binding, bindErr := s.approvalIdentity(c.Request.Context(), tx, user.ID, creds[0].CredentialID, "", "")
+	if bindErr != nil {
+		return finalizeSetupRes{}, bindErr
+	}
 	return finalizeSetupRes{
-		user: user,
+		binding: &binding,
+		user:    user,
 	}, nil
 }
 

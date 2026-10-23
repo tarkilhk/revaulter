@@ -195,7 +195,7 @@ func TestServerV2RequestLifecycle(t *testing.T) {
 	res, confirmResp := doPostJSON(t, "/v2/api/confirm", map[string]any{
 		"state":            state,
 		"confirm":          true,
-		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", ""),
+		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", "", sessionCookie.Value),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 	}, sessionCookie)
 	require.Equal(t, http.StatusOK, res.StatusCode)
@@ -1571,7 +1571,7 @@ func TestServerV2UpdateWrappedKey(t *testing.T) {
 	validAnchor := testValidWrappedAnchorEnvelope(t)
 
 	// Successful update
-	res, body := doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"passwordRequired":false,"nonce":"dummy","ciphertext":"dummy"}`)), "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID), "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
+	res, body := doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"passwordRequired":false,"nonce":"dummy","ciphertext":"dummy"}`)), "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID, ""), "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)
 		res.Body.Close()
@@ -1583,7 +1583,7 @@ func TestServerV2UpdateWrappedKey(t *testing.T) {
 	require.EqualValues(t, 2, user.WrappedKeyEpoch)
 
 	// Empty ciphertext is rejected; it cannot erase the credential protection envelope
-	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": "", "wrappedAnchorKey": "", "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID)}, sessionCookie)
+	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": "", "wrappedAnchorKey": "", "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID, "")}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)
 		res.Body.Close()
@@ -1600,7 +1600,7 @@ func TestServerV2UpdateWrappedKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"passwordRequired":false,"nonce":"dummy","ciphertext":"dummy"}`)), "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID), "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
+	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"passwordRequired":false,"nonce":"dummy","ciphertext":"dummy"}`)), "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID, ""), "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)
 		res.Body.Close()
@@ -1668,7 +1668,7 @@ func TestServerV2CredentialLifecycle(t *testing.T) {
 	res, body := doPostJSON(t, "/v2/auth/credentials/add/begin", map[string]any{
 		"credentialName": "YubiKey",
 		"keyProtection":  "prf",
-		"approvalGrant":  seedTestApprovalGrant(t, srv, "user-alice", "", "add-credential", "cred-user-alice"),
+		"approvalGrant":  seedTestApprovalGrant(t, srv, "user-alice", "", "add-credential", "cred-user-alice", ""),
 	}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)

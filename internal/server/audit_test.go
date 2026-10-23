@@ -158,7 +158,7 @@ func TestAuditRequestConfirmAndCancel(t *testing.T) {
 	body, err := json.Marshal(map[string]any{
 		"state":            state,
 		"confirm":          true,
-		"approvalGrant":    seedTestApprovalGrant(t, srv, alice.ID, state, "", ""),
+		"approvalGrant":    seedTestApprovalGrant(t, srv, alice.ID, state, "", "", sessionCookie.Value),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 	})
 	require.NoError(t, err)

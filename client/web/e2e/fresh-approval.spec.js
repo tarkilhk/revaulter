@@ -6,7 +6,7 @@ test.beforeEach(async ({ page, request }) => {
     await resetBrowserState(page)
 })
 
-test('a second action cannot reuse the first approval after verification is canceled', async ({ page }) => {
+test('reload locks the tab and canceled verification cannot approve another request', async ({ page }) => {
     test.setTimeout(60_000)
     const auth = await registerAndReachReady(page, 'Fresh approval user')
     let confirmationCount = 0
@@ -28,11 +28,13 @@ test('a second action cannot reuse the first approval after verification is canc
             value: 'dummy data',
         })
         await expect(page.getByText('first dummy')).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
         await first.done
         expect(confirmationCount).toBe(1)
         await expect(page.getByText('All clear')).toBeVisible()
 
+        await page.reload()
+        await waitForListStream(page)
         await page.evaluate(() => {
             navigator.credentials.get = async () => {
                 throw new DOMException('User canceled verification', 'NotAllowedError')
@@ -48,10 +50,10 @@ test('a second action cannot reuse the first approval after verification is canc
         })
         pendingDone = pending.done.catch(() => null)
         await expect(page.getByText('second dummy')).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
         await expect(page.getByText('User canceled verification', { exact: true })).toBeVisible()
         expect(confirmationCount).toBe(1)
-        await expect(page.getByRole('button', { name: 'Retry verification' })).toBeVisible()
+        await expect(page.getByRole('button', { name: 'Retry approval' })).toBeVisible()
         await expect(page.getByRole('button', { name: 'Confirm all', exact: true })).toHaveCount(0)
     } finally {
         if (pending) {
@@ -66,9 +68,7 @@ test('a second action cannot reuse the first approval after verification is canc
     }
 })
 
-test('six consecutive approvals use six fresh local ceremonies without retrieving server wrappers', async ({
-    page,
-}) => {
+test('six explicit approvals reuse the bounded tab unlock without retrieving server wrappers', async ({ page }) => {
     test.setTimeout(60_000)
     const auth = await registerAndReachReady(page, 'Six fresh approvals')
     let logins = 0
@@ -101,14 +101,12 @@ test('six consecutive approvals use six fresh local ceremonies without retrievin
                 value: 'dummy only',
             })
             await expect(page.getByText(note, { exact: false })).toBeVisible()
-            await page.getByRole('button', { name: 'Verify and confirm' }).click()
+            await page.getByRole('button', { name: 'Approve' }).click()
             await run.done
             await expect(page.getByText('All clear')).toBeVisible()
         }
         const ceremonies = await page.evaluate(() => window.freshCeremonies)
-        expect(ceremonies).toHaveLength(6)
-        expect(new Set(ceremonies.map((item) => JSON.stringify(item.challenge))).size).toBe(6)
-        expect(ceremonies.every((item) => item.verification === 'required')).toBe(true)
+        expect(ceremonies).toHaveLength(0)
         expect(logins).toBe(0)
     } finally {
         await auth.passkey.dispose()
@@ -138,11 +136,11 @@ test('a revoked credential cannot unlock its cached ciphertext', async ({ page }
             requestor: '127.0.0.1',
         })
         await expect(page.getByText('revoked-cache')).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
         await expect(
             page.getByText('The session or passkey changed; sign in again before approving', { exact: true })
         ).toBeVisible()
-        await expect(page.getByRole('button', { name: 'Retry verification' })).toBeVisible()
+        await expect(page.getByRole('button', { name: 'Retry approval' })).toBeVisible()
     } finally {
         await auth.passkey.dispose()
     }
