@@ -374,7 +374,7 @@ func TestServerRequestResultToken(t *testing.T) {
 	res, body = doSessionPostJSON(t, client, "/v2/api/confirm", sessionCookie, map[string]any{
 		"state":            state,
 		"confirm":          true,
-		"approvalGrant":    seedTestApprovalGrant(t, srv, alice.ID, state, "", ""),
+		"approvalGrant":    seedTestApprovalGrant(t, srv, alice.ID, state, "", "", sessionCookie.Value),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 	})
 	require.Equal(t, http.StatusOK, res.StatusCode, body)

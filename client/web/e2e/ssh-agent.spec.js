@@ -82,7 +82,7 @@ test('ssh-agent serves the public key and approves SSH auth through Revaulter', 
         // Approve the request via Revaulter
         await expect(page.getByText('SSH auth', { exact: true })).toBeVisible()
         await expect(page.getByText(keyLabel)).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
 
         const sshResult = await sshProcess.done
         expect(sshResult.stdout).toContain('hello from revaulter ssh e2e')

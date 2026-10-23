@@ -9,6 +9,7 @@ import TextField from '$components/TextField.svelte'
 
 interface Props {
     keyProtection: 'prf' | 'bitwarden'
+    signingOut: boolean
     authBusy: boolean
     authError: string | null
     loginWrappedPrimaryKey: string | null
@@ -26,6 +27,7 @@ interface Props {
 
 let {
     keyProtection,
+    signingOut,
     authBusy,
     authError,
     loginWrappedPrimaryKey,
@@ -170,7 +172,7 @@ $effect(() => {
                 >
                     {#if authBusy}
                         <LoadingSpinner size="1rem" />
-                        Authenticating…
+                        {signingOut ? 'Signing out…' : 'Authenticating…'}
                     {:else}
                         <Icon icon="key" title="Passkey" size="4" />
                         Continue with passkey
@@ -186,6 +188,7 @@ $effect(() => {
                         <button
                             type="button"
                             class="cursor-pointer text-sm text-neutral-500 underline decoration-neutral-300 underline-offset-4 transition-colors hover:text-neutral-900 dark:text-neutral-400 dark:decoration-neutral-700 dark:hover:text-neutral-50"
+                            disabled={authBusy}
                             onclick={onOpenSignup}
                         >
                             Create a new account

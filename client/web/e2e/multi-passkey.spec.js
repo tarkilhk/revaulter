@@ -36,7 +36,7 @@ async function runEncryptThroughUI(page, requestKey, plaintext, noteSuffix, pass
     })
 
     await expect(page.getByText(`multi-passkey encrypt ${noteSuffix}`)).toBeVisible()
-    await page.getByRole('button', { name: 'Verify and confirm' }).click()
+    await page.getByRole('button', { name: 'Approve' }).click()
     if (password) {
         await answerFreshPassword(page, password)
     }
@@ -63,7 +63,7 @@ async function runDecryptThroughUI(page, requestKey, encryptOutput, noteSuffix, 
     })
 
     await expect(page.getByText(`multi-passkey decrypt ${noteSuffix}`)).toBeVisible()
-    await page.getByRole('button', { name: 'Verify and confirm' }).click()
+    await page.getByRole('button', { name: 'Approve' }).click()
     if (password) {
         await answerFreshPassword(page, password)
     }

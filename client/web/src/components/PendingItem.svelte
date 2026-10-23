@@ -34,7 +34,10 @@ interface Props {
     bulkAction?: { id: number; action: 'confirm' | 'cancel' } | null
     item: V2PendingRequestItem
     now: number
-    withApprovalKey: <T>(state: string, use: (key: Uint8Array, grant: string) => Promise<T>) => Promise<T>
+    withApprovalKey: <T>(
+        state: string,
+        use: (key: Uint8Array, grant: string, assertActive: () => void) => Promise<T>
+    ) => Promise<T>
     onRemoved?: (state: string) => void
 }
 
@@ -98,9 +101,11 @@ async function doConfirm() {
     working = true
     localStatus = '_processing'
     try {
-        const res = await withApprovalKey(item.state, async (primaryKey, grant) => {
+        const res = await withApprovalKey(item.state, async (primaryKey, grant, assertActive) => {
             const req = await ensureDetail()
+            assertActive()
             const { envelope, publicKey } = await buildResponseEnvelope(req, primaryKey)
+            assertActive()
             return await v2Confirm(item.state, envelope, publicKey, grant)
         })
         if (!res?.confirmed) {
@@ -480,14 +485,14 @@ $effect(() => {
                     variant="primary"
                     size="sm"
                     disabled={working || (localStatus !== 'pending' && localStatus !== '_failed')}
-                    ariaLabel={localStatus === '_failed' ? 'Retry verification' : 'Verify and confirm'}
+                    ariaLabel={localStatus === '_failed' ? 'Retry approval' : 'Approve'}
                     onclick={doConfirm}
                 >
                     {#if working && localStatus === '_processing'}
                         <LoadingSpinner size="0.85rem" />
                     {:else}
                         <Icon icon="check" title="" size="3.5" />
-                        {localStatus === '_failed' ? 'Retry verification' : 'Verify and confirm'}
+                        {localStatus === '_failed' ? 'Retry approval' : 'Approve'}
                     {/if}
                 </Button>
                 <Button

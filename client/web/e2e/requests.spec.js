@@ -316,7 +316,7 @@ test('cli sign round-trips and the signature verifies against the browser-derive
         })
 
         await expect(page.getByText('cli sign e2e')).toBeVisible()
-        await page.getByRole('button', { name: 'Verify and confirm' }).click()
+        await page.getByRole('button', { name: 'Approve' }).click()
 
         const confirmRequest = await confirmRequestPromise
         const confirmBody = JSON.parse(confirmRequest.postData() || '{}')
@@ -381,7 +381,7 @@ for (const algorithm of ['A256GCM', 'aes-256-gcm', 'C20P', 'chacha20-poly1305'])
             })
 
             await expect(page.getByText('cli round trip encrypt')).toBeVisible()
-            await page.getByRole('button', { name: 'Verify and confirm' }).click()
+            await page.getByRole('button', { name: 'Approve' }).click()
 
             const encryptResult = await encryptRun.done
             expect(encryptResult.json.kind).toBe('revaulter/1')
@@ -404,7 +404,7 @@ for (const algorithm of ['A256GCM', 'aes-256-gcm', 'C20P', 'chacha20-poly1305'])
             })
 
             await expect(page.getByText('cli round trip decrypt')).toBeVisible()
-            await page.getByRole('button', { name: 'Verify and confirm' }).click()
+            await page.getByRole('button', { name: 'Approve' }).click()
 
             const decryptResult = await decryptRun.done
             expect(decryptResult.json.operation).toBe('decrypt')

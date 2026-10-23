@@ -496,7 +496,7 @@ func TestServerV2SigningKeyAutoStoreOnSign(t *testing.T) {
 	status, body := doPost(t, "/v2/api/confirm", map[string]any{
 		"state":            state,
 		"confirm":          true,
-		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", ""),
+		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", "", aliceCookie.Value),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 		"publicKey": map[string]any{
 			"jwk": km.JWKJSON,
@@ -715,7 +715,7 @@ func TestServerV2SigningKeyAutoStoreSkippedOnNonSign(t *testing.T) {
 	confirmBody, err := json.Marshal(map[string]any{
 		"state":            state,
 		"confirm":          true,
-		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", ""),
+		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", "", aliceCookie.Value),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 		// publicKey sent on a non-sign op must be ignored rather than fail the confirm
 		"publicKey": map[string]any{
@@ -945,7 +945,7 @@ func TestServerV2SigningKeyGetForUser(t *testing.T) {
 	status, body = doPost(t, "/v2/api/confirm", map[string]any{
 		"state":            state,
 		"confirm":          true,
-		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", ""),
+		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", "", aliceCookie.Value),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 		"publicKey": map[string]any{
 			"jwk": auto.JWKJSON,
@@ -1218,7 +1218,7 @@ func TestServerV2SigningKeyAutoStoreCannotOverwriteProvenUnpublished(t *testing.
 	confirmStatus, confirmBody := doPost(t, "/v2/api/confirm", map[string]any{
 		"state":            state,
 		"confirm":          true,
-		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", ""),
+		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", "", aliceCookie.Value),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 		"publicKey": map[string]any{
 			"jwk": hostile.JWKJSON,

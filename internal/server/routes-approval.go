@@ -159,6 +159,8 @@ func (s *Server) RouteV2AuthApprovalFinish(c *gin.Context) {
 		return
 	}
 	var cleanup *db.AuthChallenge
+	var leaseCleanup *db.AuthChallenge
+	verifiedAt := time.Now()
 	grantID, err := db.ExecuteInTransaction(c.Request.Context(), s.db, 30*time.Second, func(ctx context.Context, tx *db.DbTx) (string, error) {
 		var payload approvalChallenge
 		err := tx.AuthStore().ConsumeChallenge(ctx, req.ChallengeID, "approval", userID, &payload)
@@ -195,10 +197,22 @@ func (s *Server) RouteV2AuthApprovalFinish(c *gin.Context) {
 		if err != nil {
 			return "", err
 		}
+		if binding.Action == "" {
+			leaseCleanup, err = s.issueUnlockLease(ctx, tx, userID, binding.CredentialID, c.GetString(contextKeySessionDigest), verifiedAt)
+			if err != nil {
+				return "", err
+			}
+		}
 		if binding.State == "" && binding.Action == "" {
 			return "", nil
 		}
-		grant, err := tx.AuthStore().BeginChallenge(ctx, "approval-grant", userID, payload.Session.Challenge, time.Now().Add(approvalTTL), binding)
+		leaseID := ""
+		grantExpiry := verifiedAt.Add(approvalTTL)
+		if leaseCleanup != nil {
+			leaseID = leaseCleanup.ID
+			grantExpiry = leaseCleanup.ExpiresAt
+		}
+		grant, err := tx.AuthStore().BeginChallenge(ctx, "approval-grant", userID, payload.Session.Challenge, grantExpiry, approvalGrant{Binding: binding, LeaseID: leaseID})
 		if err != nil {
 			return "", err
 		}
@@ -216,7 +230,17 @@ func (s *Server) RouteV2AuthApprovalFinish(c *gin.Context) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"grantId": grantID})
+	response := gin.H{"grantId": grantID}
+	if leaseCleanup != nil {
+		err = s.queueAuthChallenge(leaseCleanup)
+		if err != nil {
+			AbortWithErrorJSON(c, err)
+			return
+		}
+		response["unlockLeaseId"] = leaseCleanup.ID
+		response["unlockLeaseExpiresAt"] = leaseCleanup.ExpiresAt.Unix()
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // Consume inside the same transaction as the authorized write
@@ -224,10 +248,29 @@ func (s *Server) consumeApprovalGrant(c *gin.Context, tx *db.DbTx, userID, grant
 	if userID == "" || grantID == "" || (state == "" && action == "") {
 		return approvalBinding{}, approvalDenied()
 	}
-	var binding approvalBinding
-	err := tx.AuthStore().ConsumeChallenge(c.Request.Context(), grantID, "approval-grant", userID, &binding)
+	var grant approvalGrant
+	err := tx.AuthStore().ConsumeChallenge(c.Request.Context(), grantID, "approval-grant", userID, &grant)
+	binding := grant.Binding
 	if err != nil {
 		return approvalBinding{}, approvalDenied()
+	}
+	if state != "" && grant.LeaseID == "" {
+		return approvalBinding{}, approvalDenied()
+	}
+	if grant.LeaseID != "" {
+		if action != "" {
+			return approvalBinding{}, approvalDenied()
+		}
+		lease, leaseErr := s.validateUnlockLease(c, tx, userID, grant.LeaseID)
+		if leaseErr != nil {
+			return approvalBinding{}, leaseErr
+		}
+		parentBinding := binding
+		parentBinding.State = ""
+		parentBinding.RequestDigest = ""
+		if parentBinding != lease.Binding {
+			return approvalBinding{}, approvalDenied()
+		}
 	}
 	if action == "update-wrapped-key" && (targetCredentialID == "" || binding.CredentialID != targetCredentialID) {
 		return approvalBinding{}, approvalDenied()
