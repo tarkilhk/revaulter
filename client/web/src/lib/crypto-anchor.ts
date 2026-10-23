@@ -127,6 +127,7 @@ export async function serializeAnchorSecret(kp: AnchorKeyPair): Promise<Uint8Arr
     writeUint32BE(out, offset, kp.mldsa87.seed.length)
     offset += 4
     out.set(kp.mldsa87.seed, offset)
+    pkcs8.fill(0)
     return out
 }
 
@@ -148,27 +149,38 @@ export async function parseAnchorSecret(blob: Uint8Array): Promise<AnchorKeyPair
         throw new Error('Anchor secret blob is truncated (ES384 PKCS8)')
     }
     const pkcs8 = blob.slice(offset, offset + pkcs8Len)
-    offset += pkcs8Len
-    const seedLen = readUint32BE(blob, offset)
-    offset += 4
-    if (offset + seedLen > blob.length || seedLen !== 32) {
-        throw new Error('Anchor secret blob is truncated or has invalid ML-DSA-87 seed')
-    }
-    const seed = blob.slice(offset, offset + seedLen)
+    let seed: Uint8Array | undefined
+    let transferred = false
+    try {
+        offset += pkcs8Len
+        const seedLen = readUint32BE(blob, offset)
+        offset += 4
+        if (offset + seedLen > blob.length || seedLen !== 32) {
+            throw new Error('Anchor secret blob is truncated or has invalid ML-DSA-87 seed')
+        }
+        seed = blob.slice(offset, offset + seedLen)
 
-    const privateKey = await crypto.subtle.importKey(
-        'pkcs8',
-        asBuf(pkcs8),
-        { name: 'ECDSA', namedCurve: 'P-384' },
-        true,
-        ['sign']
-    )
-    const pubJwk = await derivePublicJwkFromEcdsaPrivate(privateKey)
-    const mldsa = ml_dsa87.keygen(seed)
+        const privateKey = await crypto.subtle.importKey(
+            'pkcs8',
+            asBuf(pkcs8),
+            { name: 'ECDSA', namedCurve: 'P-384' },
+            true,
+            ['sign']
+        )
+        const pubJwk = await derivePublicJwkFromEcdsaPrivate(privateKey)
+        const mldsa = ml_dsa87.keygen(seed)
+        mldsa.secretKey.fill(0)
+        transferred = true
 
-    return {
-        es384: { privateKey, publicKeyJwk: pubJwk },
-        mldsa87: { seed, publicKey: new Uint8Array(mldsa.publicKey) },
+        return {
+            es384: { privateKey, publicKeyJwk: pubJwk },
+            mldsa87: { seed, publicKey: new Uint8Array(mldsa.publicKey) },
+        }
+    } finally {
+        pkcs8.fill(0)
+        if (!transferred) {
+            seed?.fill(0)
+        }
     }
 }
 
@@ -309,7 +321,11 @@ export async function unwrapAnchorKey(params: {
     } catch {
         throw new Error('Failed to unwrap anchor key. The passkey may be incorrect.')
     }
-    return parseAnchorSecret(blob)
+    try {
+        return await parseAnchorSecret(blob)
+    } finally {
+        blob.fill(0)
+    }
 }
 
 /**

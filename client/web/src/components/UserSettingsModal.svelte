@@ -8,6 +8,7 @@ import Icon from '$components/Icon.svelte'
 import RequestAuthTab from '$components/RequestAuthTab.svelte'
 import SigningKeysTab from '$components/SigningKeysTab.svelte'
 import TextField from '$components/TextField.svelte'
+import { generateUnlockSecret } from '$lib/crypto'
 
 import type {
     DerivedSigningKey,
@@ -20,6 +21,7 @@ import type {
 type SettingsTab = 'user' | 'request-auth' | 'ip-restrictions' | 'password' | 'passkeys' | 'signing-keys' | 'audit-log'
 
 interface Props {
+    keyProtection: 'prf' | 'bitwarden'
     userId: string
     displayName: string
     requestKey: string
@@ -51,7 +53,7 @@ interface Props {
     onUpdateAllowedIps: () => Promise<void>
     onChangePassword: (password: string) => Promise<void>
     onRemovePassword: () => Promise<void>
-    onAddPasskey: (name: string) => Promise<void>
+    onAddPasskey: (name: string, mode: 'prf' | 'bitwarden', secret: string) => Promise<void>
     onRenamePasskey: (id: string, name: string) => Promise<void>
     onDeletePasskey: (id: string) => Promise<void>
     onDeriveSigningKey: (keyLabel: string, algorithm: string) => Promise<DerivedSigningKey>
@@ -61,6 +63,7 @@ interface Props {
 }
 
 let {
+    keyProtection,
     userId,
     displayName,
     requestKey,
@@ -109,6 +112,8 @@ let confirmingRemovePassword = $state(false)
 let renamingCredentialId = $state<string | null>(null)
 let renameValue = $state('')
 let addPasskeyName = $state('')
+let addKeyProtection = $state<'prf' | 'bitwarden'>('prf')
+let addUnlockSecret = $state('')
 let showAddPasskey = $state(false)
 
 let dialogElement: HTMLElement | undefined = $state()
@@ -250,7 +255,9 @@ async function saveRenameCredential(id: string) {
 }
 
 async function handleAddPasskey() {
-    await onAddPasskey(addPasskeyName)
+    const secret = addUnlockSecret
+    addUnlockSecret = ''
+    await onAddPasskey(addPasskeyName, addKeyProtection, secret)
     addPasskeyName = ''
     showAddPasskey = false
 }
@@ -416,7 +423,9 @@ const tabs: { id: SettingsTab; label: string; icon: string }[] = [
             {:else if activeTab === 'password'}
                 <!-- Password tab -->
                 <div class="space-y-6">
-                    {#if hasPassword}
+                    {#if keyProtection === 'bitwarden'}
+                        <p class="text-sm">This credential requires the generated unlock secret saved in Bitwarden. To replace it, add a new Bitwarden credential with a new generated secret, test it, then remove the old credential.</p>
+                    {:else if hasPassword}
                         <div>
                             <div class="text-sm font-medium text-neutral-900 dark:text-neutral-50">Change password</div>
                             <p class="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
@@ -592,6 +601,17 @@ const tabs: { id: SettingsTab; label: string; icon: string }[] = [
                     {#if showAddPasskey}
                         <div class="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
                             <div class="text-sm font-medium text-neutral-900 dark:text-neutral-50">Add a passkey</div>
+                            <label class="mt-3 block text-sm" for="add-key-protection">Key protection</label>
+                            <select id="add-key-protection" bind:value={addKeyProtection} disabled={busy} class="my-2 rounded border p-2 dark:bg-neutral-900">
+                                <option value="prf">PRF passkey</option>
+                                <option value="bitwarden">Bitwarden passkey and unlock secret</option>
+                            </select>
+                            {#if addKeyProtection === 'bitwarden'}
+                                <label class="block text-sm" for="add-unlock-secret">Existing Revaulter unlock secret from Bitwarden</label>
+                                <TextField id="add-unlock-secret" type="text" autocomplete="new-password" bind:value={addUnlockSecret} disabled={busy} />
+                                <Button variant="secondary" disabled={busy} onclick={() => { addUnlockSecret = generateUnlockSecret() }}>Generate unlock secret</Button>
+                                <p class="mt-2 text-sm">Save the generated 43-character secret saved in your Revaulter login item. This credential will use that secret for browser-only decryption.</p>
+                            {/if}
                             <div class="mt-3 max-w-sm space-y-1.5">
                                 <label class="block text-xs font-medium text-neutral-700 dark:text-neutral-300" for="settings-passkey-name">Passkey name (optional)</label>
                                 <TextField
@@ -611,6 +631,7 @@ const tabs: { id: SettingsTab; label: string; icon: string }[] = [
                                     onclick={() => {
                                         showAddPasskey = false
                                         addPasskeyName = ''
+                                        addUnlockSecret = ''
                                     }}
                                 >
                                     Cancel

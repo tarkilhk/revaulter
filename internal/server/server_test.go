@@ -195,6 +195,7 @@ func TestServerV2RequestLifecycle(t *testing.T) {
 	res, confirmResp := doPostJSON(t, "/v2/api/confirm", map[string]any{
 		"state":            state,
 		"confirm":          true,
+		"approvalGrant":    seedTestApprovalGrant(t, srv, aliceUser.ID, state, "", ""),
 		"responseEnvelope": newV2ResponseEnvelope(browserJWK),
 	}, sessionCookie)
 	require.Equal(t, http.StatusOK, res.StatusCode)
@@ -1570,7 +1571,7 @@ func TestServerV2UpdateWrappedKey(t *testing.T) {
 	validAnchor := testValidWrappedAnchorEnvelope(t)
 
 	// Successful update
-	res, body := doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": "new-key-blob", "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
+	res, body := doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"passwordRequired":false,"nonce":"dummy","ciphertext":"dummy"}`)), "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID), "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)
 		res.Body.Close()
@@ -1581,14 +1582,14 @@ func TestServerV2UpdateWrappedKey(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 2, user.WrappedKeyEpoch)
 
-	// Empty string is valid
-	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": "", "wrappedAnchorKey": ""}, sessionCookie)
+	// Empty ciphertext is rejected; it cannot erase the credential protection envelope
+	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": "", "wrappedAnchorKey": "", "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID)}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)
 		res.Body.Close()
 	}()
-	require.Equal(t, http.StatusOK, res.StatusCode)
-	require.Equal(t, true, body["ok"])
+	require.Equal(t, http.StatusBadRequest, res.StatusCode)
+	require.Contains(t, body, "error")
 	user, err = as.GetUserByID(t.Context(), "user-alice")
 	require.NoError(t, err)
 	require.EqualValues(t, 2, user.WrappedKeyEpoch)
@@ -1599,7 +1600,7 @@ func TestServerV2UpdateWrappedKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": "blocked-while-pending", "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
+	res, body = doPostJSON(t, "/v2/auth/update-wrapped-key", map[string]any{"credentialId": credentialID, "wrappedPrimaryKey": base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"passwordRequired":false,"nonce":"dummy","ciphertext":"dummy"}`)), "approvalGrant": seedTestApprovalGrant(t, srv, "user-alice", "", "update-wrapped-key", credentialID), "wrappedAnchorKey": validAnchor, "advanceEpoch": true}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)
 		res.Body.Close()
@@ -1666,6 +1667,8 @@ func TestServerV2CredentialLifecycle(t *testing.T) {
 	// Some hardware authenticator paths reject creation requests that synced passkey providers accept more leniently
 	res, body := doPostJSON(t, "/v2/auth/credentials/add/begin", map[string]any{
 		"credentialName": "YubiKey",
+		"keyProtection":  "prf",
+		"approvalGrant":  seedTestApprovalGrant(t, srv, "user-alice", "", "add-credential", "cred-user-alice"),
 	}, sessionCookie)
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body)

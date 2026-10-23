@@ -34,7 +34,7 @@ interface Props {
     bulkAction?: { id: number; action: 'confirm' | 'cancel' } | null
     item: V2PendingRequestItem
     now: number
-    withApprovalKey: <T>(use: (key: Uint8Array) => Promise<T>) => Promise<T>
+    withApprovalKey: <T>(state: string, use: (key: Uint8Array, grant: string) => Promise<T>) => Promise<T>
     onRemoved?: (state: string) => void
 }
 
@@ -98,10 +98,10 @@ async function doConfirm() {
     working = true
     localStatus = '_processing'
     try {
-        const res = await withApprovalKey(async (primaryKey) => {
+        const res = await withApprovalKey(item.state, async (primaryKey, grant) => {
             const req = await ensureDetail()
             const { envelope, publicKey } = await buildResponseEnvelope(req, primaryKey)
-            return await v2Confirm(item.state, envelope, publicKey)
+            return await v2Confirm(item.state, envelope, publicKey, grant)
         })
         if (!res?.confirmed) {
             throw new Error('Confirm failed')

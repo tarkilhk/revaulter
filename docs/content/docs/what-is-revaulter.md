@@ -60,7 +60,7 @@ See [Installing Revaulter](/docs/installing-revaulter) for setup instructions.
 
 ## Supported passkeys
 
-Using Revaulter requires passkeys with support for the PRF extension, which must be supported by both the authenticator and the platform.
+The PRF protection mode requires passkeys with support for the PRF extension in both the authenticator and the platform. This fork also offers an explicitly selected Bitwarden mode: an ordinary passkey authenticates each approval while a separate generated unlock secret protects the local keys. See [Bitwarden setup](/examples/unsealing-openbao-with-phone-approval/#bitwarden-setup) for its trust boundary and setup steps.
 
 PRF (Pseudo-Random Function) lets Revaulter ask a passkey for deterministic, credential-bound secret material after a successful WebAuthn ceremony. Revaulter uses that output to derive local wrapping keys in the browser.
 

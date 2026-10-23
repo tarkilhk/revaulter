@@ -21,9 +21,9 @@ import type {
 } from '$lib/v2-types'
 
 /** Starts the public registration flow and returns the WebAuthn challenge/options payload */
-export async function v2RegisterBegin(displayName: string) {
+export async function v2RegisterBegin(displayName: string, keyProtection: 'prf' | 'bitwarden') {
     const res = await Request<V2RegisterBeginResponse>('/v2/auth/register/begin', {
-        postData: { displayName },
+        postData: { displayName, keyProtection },
     })
     return res.data
 }
@@ -176,9 +176,10 @@ export async function v2GetRequest(state: string) {
 export async function v2Confirm(
     state: string,
     responseEnvelope: V2ResponseEnvelope,
-    publicKey?: { jwk: V2SigningJwk; pem: string }
+    publicKey?: { jwk: V2SigningJwk; pem: string },
+    approvalGrant?: string
 ) {
-    const body: Record<string, unknown> = { state, confirm: true, responseEnvelope }
+    const body: Record<string, unknown> = { state, confirm: true, responseEnvelope, approvalGrant }
     if (publicKey) {
         body.publicKey = publicKey
     }
@@ -208,10 +209,11 @@ export async function v2UpdateWrappedKey(
     credentialId: string,
     wrappedPrimaryKey: string,
     wrappedAnchorKey: string,
-    advanceEpoch = false
+    advanceEpoch = false,
+    approvalGrant?: string
 ) {
     const res = await Request<{ ok: boolean }>('/v2/auth/update-wrapped-key', {
-        postData: { credentialId, wrappedPrimaryKey, wrappedAnchorKey, advanceEpoch },
+        postData: { credentialId, wrappedPrimaryKey, wrappedAnchorKey, advanceEpoch, approvalGrant },
     })
     return res.data
 }
@@ -223,9 +225,13 @@ export async function v2ListCredentials() {
 }
 
 /** Begins WebAuthn registration ceremony for adding a new credential */
-export async function v2AddCredentialBegin(credentialName?: string) {
+export async function v2AddCredentialBegin(
+    credentialName: string,
+    keyProtection: 'prf' | 'bitwarden',
+    approvalGrant: string
+) {
     const res = await Request<V2AddCredentialBeginResponse>('/v2/auth/credentials/add/begin', {
-        postData: { credentialName: credentialName || '' },
+        postData: { credentialName: credentialName || '', keyProtection, approvalGrant },
     })
     return res.data
 }
@@ -411,4 +417,26 @@ export async function* v2ListStream(
         controller.abort()
         await reader?.cancel().catch(() => {})
     }
+}
+
+export async function v2ApprovalBegin(
+    credentialId: string,
+    state?: string,
+    action?: 'add-credential' | 'update-wrapped-key'
+) {
+    const res = await Request<{
+        challengeId: string
+        challenge: string
+        options: unknown
+        keyProtection: 'prf' | 'bitwarden'
+        wrappedKeyEpoch: number
+    }>('/v2/auth/approval/begin', { postData: { credentialId, state, action } })
+    return res.data
+}
+
+export async function v2ApprovalFinish(challengeId: string, credential: unknown) {
+    const res = await Request<{ grantId: string }>('/v2/auth/approval/finish', {
+        postData: { challengeId, credential },
+    })
+    return res.data
 }

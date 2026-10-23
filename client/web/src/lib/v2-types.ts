@@ -1,3 +1,4 @@
+export type KeyProtection = 'prf' | 'bitwarden'
 export type EcP256PublicJwk = {
     kty: 'EC'
     crv: 'P-256'
@@ -174,6 +175,7 @@ export type V2LoginBeginResponse = {
 }
 
 export type V2LoginFinishResponse = {
+    keyProtection: KeyProtection
     authenticated: boolean
     session?: V2AuthSessionInfo
     wrappedPrimaryKey?: string
@@ -197,6 +199,7 @@ export type V2SessionResponse = {
 }
 
 export type V2CredentialItem = {
+    keyProtection: KeyProtection
     credentialId: string
     id: string
     displayName: string

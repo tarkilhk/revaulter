@@ -357,7 +357,7 @@ func TestRegistrationBeginOffersPostQuantumCredentialParameters(t *testing.T) {
 	require.NoError(t, err)
 
 	s := &Server{webAuthn: wa}
-	creation, session, err := s.beginWebAuthnSession(user)
+	creation, session, err := s.beginWebAuthnSession(user, "prf")
 	require.NoError(t, err)
 	require.NotNil(t, session)
 
@@ -386,7 +386,7 @@ func TestWebAuthnCeremoniesAcrossCredentialAlgorithms(t *testing.T) {
 			require.NoError(t, err)
 
 			s := &Server{webAuthn: wa}
-			creation, registrationSession, err := s.beginWebAuthnSession(user)
+			creation, registrationSession, err := s.beginWebAuthnSession(user, "prf")
 			require.NoError(t, err)
 
 			pk := newTestPasskey(t, alg)
@@ -431,7 +431,7 @@ func TestCredentialPublicKeyHashMatchesStoredCredentialAcrossAlgorithms(t *testi
 			require.NoError(t, err)
 
 			s := &Server{webAuthn: wa}
-			creation, session, err := s.beginWebAuthnSession(user)
+			creation, session, err := s.beginWebAuthnSession(user, "prf")
 			require.NoError(t, err)
 
 			pk := newTestPasskey(t, alg)
@@ -464,7 +464,7 @@ func TestRegistrationRejectsAnAlgorithmTheServerDoesNotOffer(t *testing.T) {
 	require.NoError(t, err)
 
 	s := &Server{webAuthn: wa}
-	creation, session, err := s.beginWebAuthnSession(user)
+	creation, session, err := s.beginWebAuthnSession(user, "prf")
 	require.NoError(t, err)
 
 	// ES256K is registered with COSE but is not on the list the server offers
@@ -497,7 +497,7 @@ func TestLoginRejectsAnAssertionSignedByADifferentCredential(t *testing.T) {
 			require.NoError(t, err)
 
 			s := &Server{webAuthn: wa}
-			creation, session, err := s.beginWebAuthnSession(user)
+			creation, session, err := s.beginWebAuthnSession(user, "prf")
 			require.NoError(t, err)
 
 			pk := newTestPasskey(t, alg)

@@ -69,6 +69,7 @@ type AuthChallenge struct {
 }
 
 type AuthCredentialRecord struct {
+	KeyProtection               string
 	ID                          string
 	CredentialID                string
 	DisplayName                 string
@@ -244,7 +245,7 @@ func scanUser(scanner interface{ Scan(dest ...any) error }, extra ...any) (*User
 
 func (s *AuthStore) ListCredentials(ctx context.Context, userID string) ([]AuthCredentialRecord, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, credential_id, display_name, public_key, sign_count, wrapped_primary_key, wrapped_anchor_key, attestation_payload, attestation_signature_es384, attestation_signature_mldsa87, wrapped_key_epoch, created_at, last_used_at
+		`SELECT id, credential_id, display_name, public_key, sign_count, wrapped_primary_key, wrapped_anchor_key, attestation_payload, attestation_signature_es384, attestation_signature_mldsa87, wrapped_key_epoch, created_at, last_used_at, key_protection
 			FROM v2_user_credentials
 			WHERE user_id = $1
 			ORDER BY created_at ASC`,
@@ -258,7 +259,7 @@ func (s *AuthStore) ListCredentials(ctx context.Context, userID string) ([]AuthC
 	var out []AuthCredentialRecord
 	for rows.Next() {
 		var rec AuthCredentialRecord
-		err = rows.Scan(&rec.ID, &rec.CredentialID, &rec.DisplayName, &rec.PublicKey, &rec.SignCount, &rec.WrappedPrimaryKey, &rec.WrappedAnchorKey, &rec.AttestationPayload, &rec.AttestationSignatureEs384, &rec.AttestationSignatureMldsa87, &rec.WrappedKeyEpoch, &rec.CreatedAt, &rec.LastUsedAt)
+		err = rows.Scan(&rec.ID, &rec.CredentialID, &rec.DisplayName, &rec.PublicKey, &rec.SignCount, &rec.WrappedPrimaryKey, &rec.WrappedAnchorKey, &rec.AttestationPayload, &rec.AttestationSignatureEs384, &rec.AttestationSignatureMldsa87, &rec.WrappedKeyEpoch, &rec.CreatedAt, &rec.LastUsedAt, &rec.KeyProtection)
 		if err != nil {
 			return nil, err
 		}
@@ -520,7 +521,7 @@ func (s *AuthStore) GetCredentialForUser(ctx context.Context, userID string, cre
 	var rec AuthCredentialRecord
 	err := s.db.
 		QueryRow(ctx,
-			`SELECT id, credential_id, display_name, public_key, sign_count, wrapped_primary_key, wrapped_anchor_key, attestation_payload, attestation_signature_es384, attestation_signature_mldsa87, wrapped_key_epoch, created_at, last_used_at
+			`SELECT id, credential_id, display_name, public_key, sign_count, wrapped_primary_key, wrapped_anchor_key, attestation_payload, attestation_signature_es384, attestation_signature_mldsa87, wrapped_key_epoch, created_at, last_used_at, key_protection
 			FROM v2_user_credentials
 			WHERE user_id = $1 AND credential_id = $2`,
 			userID, credentialID,
@@ -539,6 +540,7 @@ func (s *AuthStore) GetCredentialForUser(ctx context.Context, userID string, cre
 			&rec.WrappedKeyEpoch,
 			&rec.CreatedAt,
 			&rec.LastUsedAt,
+			&rec.KeyProtection,
 		)
 	if s.db.IsNoRowsError(err) {
 		return nil, nil
@@ -663,11 +665,11 @@ func (s *AuthStore) HasPendingChallenge(ctx context.Context, userID string, kind
 func (s *AuthStore) GetCredentialByCredentialID(ctx context.Context, credentialID string, userID string) (*AuthCredentialRecord, error) {
 	var rec AuthCredentialRecord
 	err := s.db.QueryRow(ctx,
-		`SELECT id, credential_id, display_name, public_key, sign_count, wrapped_primary_key, wrapped_anchor_key, attestation_payload, attestation_signature_es384, attestation_signature_mldsa87, wrapped_key_epoch, created_at, last_used_at
+		`SELECT id, credential_id, display_name, public_key, sign_count, wrapped_primary_key, wrapped_anchor_key, attestation_payload, attestation_signature_es384, attestation_signature_mldsa87, wrapped_key_epoch, created_at, last_used_at, key_protection
 			FROM v2_user_credentials
 			WHERE credential_id = $1 AND user_id = $2`,
 		credentialID, userID,
-	).Scan(&rec.ID, &rec.CredentialID, &rec.DisplayName, &rec.PublicKey, &rec.SignCount, &rec.WrappedPrimaryKey, &rec.WrappedAnchorKey, &rec.AttestationPayload, &rec.AttestationSignatureEs384, &rec.AttestationSignatureMldsa87, &rec.WrappedKeyEpoch, &rec.CreatedAt, &rec.LastUsedAt)
+	).Scan(&rec.ID, &rec.CredentialID, &rec.DisplayName, &rec.PublicKey, &rec.SignCount, &rec.WrappedPrimaryKey, &rec.WrappedAnchorKey, &rec.AttestationPayload, &rec.AttestationSignatureEs384, &rec.AttestationSignatureMldsa87, &rec.WrappedKeyEpoch, &rec.CreatedAt, &rec.LastUsedAt, &rec.KeyProtection)
 	if s.db.IsNoRowsError(err) {
 		return nil, nil
 	} else if err != nil {
@@ -755,6 +757,13 @@ func (s *AuthStore) RenameCredential(ctx context.Context, id string, userID stri
 }
 
 func (s *AuthStore) DeleteCredential(ctx context.Context, id, userID string) error {
+	if !s.db.IsTransaction() {
+		return errors.New("credential deletion requires transaction")
+	}
+	_, err := s.db.Exec(ctx, `UPDATE v2_users SET id = id WHERE id = $1`, userID)
+	if err != nil {
+		return err
+	}
 	switch s.kind {
 	case BackendPostgres:
 		return s.deleteCredentialPostgres(ctx, id, userID)
@@ -994,4 +1003,41 @@ func (e *InvalidAllowedIPError) Unwrap() error {
 	}
 
 	return e.Kind
+}
+
+// SetCredentialKeyProtection is called only when inserting a new credential in the same transaction
+func (s *AuthStore) SetCredentialKeyProtection(ctx context.Context, userID, credentialID, mode string) error {
+	if mode != "prf" && mode != "bitwarden" {
+		return errors.New("unsupported key protection")
+	}
+	_, err := s.db.Exec(ctx, `UPDATE v2_user_credentials SET key_protection = $1 WHERE user_id = $2 AND credential_id = $3`, mode, userID, credentialID)
+	return err
+}
+
+func (s *AuthStore) UpdateCredentialSignCount(ctx context.Context, userID, credentialID string, count uint32) error {
+	_, err := s.db.Exec(ctx, `UPDATE v2_user_credentials SET sign_count = $1 WHERE user_id = $2 AND credential_id = $3`, int64(count), userID, credentialID)
+	return err
+}
+
+// LockApprovalIdentity serializes approval with credential removal and key rotation
+// All callers lock the user before the credential and retain both locks until commit
+func (s *AuthStore) LockApprovalIdentity(ctx context.Context, userID, credentialID string) error {
+	if !s.db.IsTransaction() {
+		return errors.New("approval identity lock requires transaction")
+	}
+	affected, err := s.db.Exec(ctx, `UPDATE v2_users SET id = id WHERE id = $1 AND status = 'active'`, userID)
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrUserNotFound
+	}
+	affected, err = s.db.Exec(ctx, `UPDATE v2_user_credentials SET id = id WHERE user_id = $1 AND credential_id = $2`, userID, credentialID)
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrCredentialNotFound
+	}
+	return nil
 }

@@ -122,6 +122,7 @@ export class PrfUnavailableError extends Error {
 // webauthnRegister creates a passkey and returns its serialized registration data
 export async function webauthnRegister(args: {
     options: unknown
+    keyProtection?: 'prf' | 'bitwarden'
 }): Promise<{ id: string; publicKeyHash: string; signCount: number; raw?: unknown }> {
     if (!('credentials' in navigator) || typeof PublicKeyCredential === 'undefined') {
         throw new Error('WebAuthn is not available in this browser')
@@ -151,7 +152,7 @@ export async function webauthnRegister(args: {
     const extensionResults = cred.getClientExtensionResults() as {
         prf?: { enabled?: boolean }
     }
-    if (extensionResults?.prf?.enabled !== true) {
+    if ((args.keyProtection ?? 'prf') === 'prf' && extensionResults?.prf?.enabled !== true) {
         throw new PrfUnavailableError()
     }
 
@@ -173,6 +174,8 @@ export async function webauthnLoginWithPrf(args: {
     challenge: string
     prfSalt?: Uint8Array
     options?: unknown
+    requirePrf?: boolean
+    evaluatePrf?: boolean
 }): Promise<{ id: string; signCount: number; prfSecret?: Uint8Array; raw?: unknown }> {
     const salt = args.prfSalt ?? generatePrfSalt()
     // Copy the view into a standalone ArrayBuffer because WebAuthn accepts BufferSource but the PRF type requires ArrayBuffer
@@ -216,6 +219,10 @@ export async function webauthnLoginWithPrf(args: {
               } as AuthenticationExtensionsClientInputs,
           }
 
+    if (args.evaluatePrf === false) {
+        delete effectivePublicKey.extensions
+    }
+
     const assertion = (await navigator.credentials.get({
         publicKey: effectivePublicKey,
     })) as PublicKeyCredential | null
@@ -237,14 +244,14 @@ export async function webauthnLoginWithPrf(args: {
     }
 
     const prfBuf = ext?.prf?.results?.first
-    if (!prfBuf) {
+    if (!prfBuf && args.requirePrf !== false) {
         throw new Error('Authenticator did not return PRF output')
     }
 
     return {
         id: assertion.id,
         signCount: 0,
-        prfSecret: new Uint8Array(prfBuf),
+        prfSecret: prfBuf ? new Uint8Array(prfBuf) : undefined,
         raw: {
             credential: serializePublicKeyCredential(assertion),
             authenticatorData: bytesToBase64Url(new Uint8Array(resp.authenticatorData)),

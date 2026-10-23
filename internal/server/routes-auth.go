@@ -32,7 +32,8 @@ import (
 )
 
 type v2AuthRegisterBeginRequest struct {
-	DisplayName string `json:"displayName"`
+	KeyProtection string `json:"keyProtection"`
+	DisplayName   string `json:"displayName"`
 }
 
 type v2AuthRegisterFinishRequest struct {
@@ -46,6 +47,7 @@ type v2AuthLoginFinishRequest struct {
 }
 
 type v2RegisterChallengePayload struct {
+	KeyProtection   string                   `json:"keyProtection"`
 	UserID          string                   `json:"userId"`
 	DisplayName     string                   `json:"displayName"`
 	WebAuthnUserID  string                   `json:"webauthnUserId"`
@@ -94,6 +96,7 @@ type v2AuthLoginBeginResponse struct {
 }
 
 type v2AuthLoginFinishResponse struct {
+	KeyProtection             string             `json:"keyProtection"`
 	Authenticated             bool               `json:"authenticated"`
 	Session                   *v2AuthSessionInfo `json:"session,omitempty"`
 	WrappedPrimaryKey         string             `json:"wrappedPrimaryKey,omitempty"`
@@ -174,6 +177,7 @@ type v2AuthUpdateDisplayNameRequest struct {
 }
 
 type v2AuthUpdateWrappedKeyRequest struct {
+	ApprovalGrant     string `json:"approvalGrant"`
 	CredentialID      string `json:"credentialId"`
 	WrappedPrimaryKey string `json:"wrappedPrimaryKey"`
 	WrappedAnchorKey  string `json:"wrappedAnchorKey"`
@@ -181,6 +185,7 @@ type v2AuthUpdateWrappedKeyRequest struct {
 }
 
 type v2AuthCredentialItem struct {
+	KeyProtection   string `json:"keyProtection"`
 	CredentialID    string `json:"credentialId"`
 	ID              string `json:"id"`
 	DisplayName     string `json:"displayName"`
@@ -191,6 +196,8 @@ type v2AuthCredentialItem struct {
 }
 
 type v2AddCredentialChallengePayload struct {
+	Approver        *approvalBinding         `json:"approver"`
+	KeyProtection   string                   `json:"keyProtection"`
 	UserID          string                   `json:"userId"`
 	WebAuthnUserID  string                   `json:"webauthnUserId"`
 	DisplayName     string                   `json:"displayName"`
@@ -198,6 +205,9 @@ type v2AddCredentialChallengePayload struct {
 }
 
 type v2AuthAddCredentialBeginRequest struct {
+	approver       *approvalBinding
+	ApprovalGrant  string `json:"approvalGrant"`
+	KeyProtection  string `json:"keyProtection"`
 	CredentialName string `json:"credentialName"`
 }
 
@@ -248,6 +258,14 @@ func (s *Server) RouteV2AuthRegisterBegin(c *gin.Context) {
 		return
 	}
 
+	if req.KeyProtection == "" {
+		req.KeyProtection = "prf"
+	}
+	if !validKeyProtection(req.KeyProtection) {
+		AbortWithErrorJSON(c, NewResponseError(http.StatusBadRequest, "Unsupported key protection"))
+		return
+	}
+
 	// Create the user object for registration
 	userID := uuid.NewV4().String()
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
@@ -258,7 +276,7 @@ func (s *Server) RouteV2AuthRegisterBegin(c *gin.Context) {
 	}
 
 	// Begin the WebAuthn registration session
-	creation, session, err := s.beginWebAuthnSession(user)
+	creation, session, err := s.beginWebAuthnSession(user, req.KeyProtection)
 	if err != nil {
 		AbortWithErrorJSON(c, err)
 		return
@@ -268,6 +286,7 @@ func (s *Server) RouteV2AuthRegisterBegin(c *gin.Context) {
 	// BeginChallenge must be executed in a transaction
 	ch, err := db.ExecuteInTransaction(c.Request.Context(), s.db, 20*time.Second, func(ctx context.Context, tx *db.DbTx) (*db.AuthChallenge, error) {
 		return tx.AuthStore().BeginChallenge(ctx, "register", userID, session.Challenge, session.Expires, v2RegisterChallengePayload{
+			KeyProtection:   req.KeyProtection,
 			UserID:          userID,
 			DisplayName:     req.DisplayName,
 			WebAuthnUserID:  base64.RawURLEncoding.EncodeToString(user.id),
@@ -302,16 +321,15 @@ func (s *Server) RouteV2AuthRegisterBegin(c *gin.Context) {
 	})
 }
 
-func (s *Server) beginWebAuthnSession(user *v2WebAuthnUser) (creation *protocol.CredentialCreation, session *webauthnlib.SessionData, err error) {
-	// Begin the WebAuthn registration session
-	return s.webAuthn.BeginRegistration(user,
-		// We require discoverable credentials aka Passkeys
+func (s *Server) beginWebAuthnSession(user *v2WebAuthnUser, mode string) (creation *protocol.CredentialCreation, session *webauthnlib.SessionData, err error) {
+	options := []webauthnlib.RegistrationOption{
 		webauthnlib.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
-		// Add PRF extension
-		webauthnlib.WithExtensions(webauthnlib.WithExtensionPRFSupport()),
-		// Offer post-quantum credential algorithms alongside the classical ones
 		webauthnlib.WithCredentialParameters(credentialParameters()),
-	)
+	}
+	if mode == "prf" {
+		options = append(options, webauthnlib.WithExtensions(webauthnlib.WithExtensionPRFSupport()))
+	}
+	return s.webAuthn.BeginRegistration(user, options...)
 }
 
 // credentialParameters returns the credential algorithms offered during registration, in order of preference
@@ -510,6 +528,10 @@ func (s *Server) RouteV2AuthLoginFinish(c *gin.Context) {
 	resp := v2AuthLoginFinishResponse{
 		Authenticated: true,
 		Session:       sessionInfoFromUser(res.user, int(max(time.Until(res.sess.ExpiresAt), 0).Seconds())),
+	}
+
+	if res.cred != nil {
+		resp.KeyProtection = res.cred.KeyProtection
 	}
 
 	// Throttle wrapped primary key delivery
@@ -976,6 +998,22 @@ func (s *Server) updateWrappedKey(c *gin.Context, tx *db.DbTx, userID string, re
 	ctx := c.Request.Context()
 	as := tx.AuthStore()
 
+	_, err := s.consumeApprovalGrant(c, tx, userID, req.ApprovalGrant, "", "update-wrapped-key", req.CredentialID)
+	if err != nil {
+		return err
+	}
+	record, err := as.GetCredentialForUser(ctx, userID, req.CredentialID)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		return NewResponseError(http.StatusNotFound, "Credential not found")
+	}
+	err = validateProtectionEnvelope(req.WrappedPrimaryKey, record.KeyProtection, req.CredentialID)
+	if err != nil {
+		return err
+	}
+
 	// Refuse the update while an add-credential WebAuthn ceremony is in flight for this user
 	// The in-flight ceremony will wrap the new credential's primary key with the current password, and letting the password change land in between would leave that new credential wrapped with the old password while the signed-in credential picks up the new one
 	pending, err := as.HasPendingChallenge(ctx, userID, "add-credential")
@@ -1055,6 +1093,7 @@ func (s *Server) RouteV2AuthListCredentials(c *gin.Context) {
 	items := make([]v2AuthCredentialItem, len(records))
 	for i, rec := range records {
 		items[i] = v2AuthCredentialItem{
+			KeyProtection:   rec.KeyProtection,
 			CredentialID:    rec.CredentialID,
 			ID:              rec.ID,
 			DisplayName:     rec.DisplayName,
@@ -1087,6 +1126,11 @@ func (s *Server) RouteV2AuthAddCredentialBegin(c *gin.Context) {
 
 	// Rest of the method must run in a transaction
 	res, err := db.ExecuteInTransaction(c.Request.Context(), s.db, 30*time.Second, func(ctx context.Context, tx *db.DbTx) (addCredentialBeginRes, error) {
+		binding, grantErr := s.consumeApprovalGrant(c, tx, userID, req.ApprovalGrant, "", "add-credential", "")
+		if grantErr != nil {
+			return addCredentialBeginRes{}, grantErr
+		}
+		req.approver = &binding
 		return s.addCredentialBegin(c.Request.Context(), tx, userID, &req)
 	})
 	if err != nil {
@@ -1138,6 +1182,12 @@ func credentialCreationWithoutExclusions(creation *protocol.CredentialCreation) 
 
 func (s *Server) addCredentialBegin(ctx context.Context, tx *db.DbTx, userID string, req *v2AuthAddCredentialBeginRequest) (addCredentialBeginRes, error) {
 	as := tx.AuthStore()
+	if req.KeyProtection == "" {
+		req.KeyProtection = "prf"
+	}
+	if !validKeyProtection(req.KeyProtection) {
+		return addCredentialBeginRes{}, NewResponseError(http.StatusBadRequest, "Unsupported key protection")
+	}
 
 	// The session JWT's Ready claim is a snapshot from token mint time
 	// Re-check the stored user to reject accounts disabled or un-readied after the session was issued
@@ -1161,12 +1211,13 @@ func (s *Server) addCredentialBegin(ctx context.Context, tx *db.DbTx, userID str
 
 	// Begin the WebAuthn registration
 	// Begin the WebAuthn registration session
-	creation, session, err := s.beginWebAuthnSession(userRecord)
+	creation, session, err := s.beginWebAuthnSession(userRecord, req.KeyProtection)
 	if err != nil {
 		return addCredentialBeginRes{}, err
 	}
 
 	ch, err := as.BeginChallenge(ctx, "add-credential", userID, session.Challenge, session.Expires, v2AddCredentialChallengePayload{
+		Approver: req.approver, KeyProtection: req.KeyProtection,
 		UserID:          userID,
 		WebAuthnUserID:  base64.RawURLEncoding.EncodeToString(userRecord.id),
 		DisplayName:     strings.TrimSpace(req.CredentialName),
@@ -1278,6 +1329,7 @@ func (s *Server) addCredentialFinish(c *gin.Context, tx *db.DbTx, vals addCreden
 	// Bind the consume to the authenticated user's ID at the SQL layer so an attacker who learned a different user's challenge ID cannot consume it
 	// The post-consume payload.UserID equality check below remains as defense in depth
 	var payload v2AddCredentialChallengePayload
+	payload.KeyProtection = "prf"
 	err := as.ConsumeChallenge(c.Request.Context(), vals.req.ChallengeID, "add-credential", vals.userID, &payload)
 	if errors.Is(err, db.ErrInvalidChallenge) {
 		return addCredentialFinishRes{}, NewResponseError(http.StatusConflict, "Challenge is invalid or expired")
@@ -1287,6 +1339,17 @@ func (s *Server) addCredentialFinish(c *gin.Context, tx *db.DbTx, vals addCreden
 
 	if payload.UserID != vals.userID {
 		return addCredentialFinishRes{}, NewResponseError(http.StatusForbidden, "Challenge does not belong to this user")
+	}
+
+	if payload.Approver == nil {
+		return addCredentialFinishRes{}, approvalDenied()
+	}
+	currentApprover, approvalErr := s.approvalIdentity(c.Request.Context(), tx, vals.userID, payload.Approver.CredentialID, "", "add-credential")
+	if approvalErr != nil {
+		return addCredentialFinishRes{}, approvalErr
+	}
+	if currentApprover != *payload.Approver {
+		return addCredentialFinishRes{}, approvalDenied()
 	}
 
 	if payload.WebAuthnSession == nil {
@@ -1323,7 +1386,7 @@ func (s *Server) addCredentialFinish(c *gin.Context, tx *db.DbTx, vals addCreden
 	if err != nil {
 		return addCredentialFinishRes{}, err
 	}
-	err = requirePRFSupport(cred)
+	err = requireCredentialProtection(cred, payload.KeyProtection)
 	if err != nil {
 		return addCredentialFinishRes{}, err
 	}
@@ -1384,6 +1447,10 @@ func (s *Server) addCredentialFinish(c *gin.Context, tx *db.DbTx, vals addCreden
 		credName = payload.DisplayName
 	}
 
+	err = validateProtectionEnvelope(vals.req.WrappedPrimaryKey, payload.KeyProtection, credID)
+	if err != nil {
+		return addCredentialFinishRes{}, err
+	}
 	err = as.AddCredential(c.Request.Context(), db.AddCredentialInput{
 		UserID:                      vals.userID,
 		CredentialID:                credID,
@@ -1413,6 +1480,10 @@ func (s *Server) addCredentialFinish(c *gin.Context, tx *db.DbTx, vals addCreden
 		return addCredentialFinishRes{}, err
 	}
 
+	err = as.SetCredentialKeyProtection(c.Request.Context(), vals.userID, credID, payload.KeyProtection)
+	if err != nil {
+		return addCredentialFinishRes{}, err
+	}
 	return addCredentialFinishRes{}, nil
 }
 
@@ -1553,6 +1624,7 @@ func (s *Server) registerFinish(c *gin.Context, tx *db.DbTx, req v2AuthRegisterF
 	// Consume the challenge in the database and retrieve the payload
 	// Register has no authenticated user yet, so the consume isn't bound to a userID
 	var payload v2RegisterChallengePayload
+	payload.KeyProtection = "prf"
 	err := as.ConsumeChallenge(c.Request.Context(), req.ChallengeID, "register", "", &payload)
 	if errors.Is(err, db.ErrInvalidChallenge) {
 		return registerFinishRes{}, NewResponseError(http.StatusConflict, "Registration challenge is invalid or expired")
@@ -1580,7 +1652,7 @@ func (s *Server) registerFinish(c *gin.Context, tx *db.DbTx, req v2AuthRegisterF
 	if err != nil {
 		return registerFinishRes{}, err
 	}
-	err = requirePRFSupport(cred)
+	err = requireCredentialProtection(cred, payload.KeyProtection)
 	if err != nil {
 		return registerFinishRes{}, err
 	}
@@ -1598,6 +1670,11 @@ func (s *Server) registerFinish(c *gin.Context, tx *db.DbTx, req v2AuthRegisterF
 	if errors.Is(err, db.ErrUserAlreadyExists) {
 		return registerFinishRes{}, NewResponseError(http.StatusConflict, "User already exists")
 	} else if err != nil {
+		return registerFinishRes{}, err
+	}
+
+	err = as.SetCredentialKeyProtection(c.Request.Context(), user.ID, base64.RawURLEncoding.EncodeToString(cred.ID), payload.KeyProtection)
+	if err != nil {
 		return registerFinishRes{}, err
 	}
 
@@ -1810,6 +1887,11 @@ func (s *Server) finalizeSetup(c *gin.Context, tx *db.DbTx, vals finalizeSetupVa
 
 	if len(creds) != 1 {
 		return finalizeSetupRes{}, NewResponseErrorf(http.StatusConflict, "expected exactly one credential for user at finalize-signup, got %d", len(creds))
+	}
+
+	err = validateProtectionEnvelope(vals.req.WrappedPrimaryKey, creds[0].KeyProtection, creds[0].CredentialID)
+	if err != nil {
+		return finalizeSetupRes{}, err
 	}
 
 	// Get the expected pub key hash

@@ -7,6 +7,8 @@ import Logo from '$components/Logo.svelte'
 import TextField from '$components/TextField.svelte'
 
 interface Props {
+    keyProtection: 'prf' | 'bitwarden'
+    onKeyProtectionInput: (value: 'prf' | 'bitwarden') => void
     authBusy: boolean
     authError: string | null
     authErrorHelpHref: string | null
@@ -23,6 +25,8 @@ interface Props {
 }
 
 let {
+    keyProtection,
+    onKeyProtectionInput,
     authBusy,
     authError,
     authErrorHelpHref,
@@ -40,13 +44,20 @@ let {
 
 let passwordConfirm = $state('')
 let confirmError = $state<string | null>(null)
+let secretSaved = $state(false)
 
 function handleSetPassword() {
     confirmError = null
-    if (passwordInput !== passwordConfirm) {
+    if (keyProtection === 'bitwarden' && !secretSaved) {
+        confirmError = 'Save the unlock secret in Bitwarden before continuing'
+        return
+    }
+    if (keyProtection === 'prf' && passwordInput !== passwordConfirm) {
         confirmError = 'Passwords do not match'
         return
     }
+    passwordConfirm = ''
+    secretSaved = false
     void onSetPassword()
 }
 
@@ -54,12 +65,15 @@ function authHeadline() {
     if (uiState === 'signup') {
         return 'Create a new account'
     }
-    return 'Add a password'
+    return keyProtection === 'bitwarden' ? 'Save your unlock secret' : 'Add a password'
 }
 
 function authBodyCopy() {
     if (uiState === 'signup') {
-        return 'Register a new Revaulter user with a resident passkey. You can add an optional password after registration.'
+        return 'Choose how to protect your local keys, then register a passkey. This choice will not change automatically.'
+    }
+    if (keyProtection === 'bitwarden') {
+        return 'Save this generated secret as the password in the same Bitwarden login item as your Revaulter passkey. Autofill it for each approval. This is not your Bitwarden master password or a CI token. Losing it loses access to these keys.'
     }
     return 'Passwords are optional. If you set one now, Revaulter will ask for it after future passkey sign-ins before unlocking local keys.'
 }
@@ -105,6 +119,12 @@ function authBodyCopy() {
                         }
                     }}
                 >
+                    <fieldset class="space-y-2" disabled={authBusy}>
+                        <legend class="text-sm font-medium">Key protection</legend>
+                        <label class="block text-sm"><input type="radio" name="key-protection" checked={keyProtection === 'prf'} onchange={() => onKeyProtectionInput('prf')} /> PRF passkey</label>
+                        <label class="block text-sm"><input type="radio" name="key-protection" checked={keyProtection === 'bitwarden'} onchange={() => onKeyProtectionInput('bitwarden')} /> Bitwarden passkey and unlock secret</label>
+                        <p class="text-sm text-neutral-500">Bitwarden mode uses an ordinary passkey plus a separate generated secret for browser-only decryption. A fresh passkey verification does not always prompt for a fingerprint.</p>
+                    </fieldset>
                     <div class="space-y-2">
                         <label class="block text-sm font-medium text-neutral-900 dark:text-neutral-100" for="v2-displayname">Display name (optional)</label>
                         <TextField
@@ -139,10 +159,11 @@ function authBodyCopy() {
                     }}
                 >
                     <div class="space-y-2">
-                        <label class="block text-sm font-medium text-neutral-900 dark:text-neutral-100" for="v2-password-setup">Password</label>
+                        <label class="block text-sm font-medium text-neutral-900 dark:text-neutral-100" for="v2-password-setup">{keyProtection === 'bitwarden' ? 'Unlock secret' : 'Password'}</label>
                         <TextField
                             id="v2-password-setup"
-                            type="password"
+                            type={keyProtection === 'bitwarden' ? 'text' : 'password'}
+                            autocomplete="new-password"
                             value={passwordInput}
                             oninput={(event) => {
                                 confirmError = null
@@ -151,6 +172,10 @@ function authBodyCopy() {
                         />
                     </div>
 
+                    {#if keyProtection === 'bitwarden'}
+                        <label class="block text-sm"><input type="checkbox" bind:checked={secretSaved} /> I saved this secret in my Revaulter Bitwarden login item.</label>
+                        <p class="text-sm text-neutral-500">Use an item-specific URI rule restricted to this HTTPS origin. Keep other sites out of this item.</p>
+                    {:else}
                     <div class="space-y-2">
                         <label class="block text-sm font-medium text-neutral-900 dark:text-neutral-100" for="v2-password-confirm">Confirm password</label>
                         <TextField
@@ -163,6 +188,7 @@ function authBodyCopy() {
                         />
                     </div>
 
+                    {/if}
                     {#if confirmError}
                         <div class="rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-sm text-rose-800 dark:border-rose-900/70 dark:bg-rose-950/40 dark:text-rose-200">
                             {confirmError}
@@ -178,8 +204,9 @@ function authBodyCopy() {
                             disabled={authBusy}
                         >
                             {#if authBusy}<LoadingSpinner size="1rem" />{/if}
-                            Save password
+                            {keyProtection === 'bitwarden' ? 'Finish setup' : 'Save password'}
                         </Button>
+                        {#if keyProtection === 'prf'}
                         <Button
                             type="button"
                             class="flex-1"
@@ -193,6 +220,7 @@ function authBodyCopy() {
                         >
                             Skip password
                         </Button>
+                        {/if}
                     </div>
                 </form>
             {/if}

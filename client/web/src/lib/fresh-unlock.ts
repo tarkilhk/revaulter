@@ -1,10 +1,12 @@
 import { deriveWrappingKey, parseWrappedPrimaryKeyEnvelope, unwrapPrimaryKey } from '$lib/crypto'
 import { type AnchorKeyPair, unwrapAnchorKey } from '$lib/crypto-anchor'
-import { base64UrlToBytes, bytesToBase64Url } from '$lib/utils'
+import { base64UrlToBytes } from '$lib/utils'
+import { v2ApprovalBegin, v2ApprovalFinish } from '$lib/v2-api'
 import { webauthnLoginWithPrf } from '$lib/webauthn'
 
 // Only ciphertext and public credential metadata may survive between actions
 export interface WrappedKeyCache {
+    keyProtection: 'prf' | 'bitwarden'
     userId: string
     credentialId: string
     rpId: string
@@ -16,7 +18,8 @@ export interface WrappedKeyCache {
 
 export interface FreshKeys {
     primaryKey: Uint8Array
-    prfSecret: Uint8Array
+    prfSecret: Uint8Array | undefined
+    approvalGrant: string
     anchor: AnchorKeyPair | null
     password: string | undefined
 }
@@ -25,6 +28,8 @@ export interface FreshKeys {
 // There is deliberately no cache or already-unlocked path for plaintext keys
 export async function withFreshKeys<T>(args: {
     cache: WrappedKeyCache
+    requestState?: string
+    requestAction?: 'add-credential' | 'update-wrapped-key'
     authorize: () => Promise<void>
     getPassword: () => Promise<string | null>
     use: (keys: FreshKeys) => Promise<T>
@@ -41,22 +46,22 @@ export async function withFreshKeys<T>(args: {
     let password: string | undefined
     try {
         await args.authorize()
+        const begin = await v2ApprovalBegin(cache.credentialId, args.requestState, args.requestAction)
+        if (begin.keyProtection !== cache.keyProtection || begin.wrappedKeyEpoch !== cache.wrappedKeyEpoch) {
+            throw new Error('Credential protection changed; sign in again')
+        }
         const assertion = await webauthnLoginWithPrf({
-            challenge: bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))),
+            challenge: begin.challenge,
+            options: begin.options,
             prfSalt: base64UrlToBytes(cache.basePrfSalt),
-            options: {
-                publicKey: {
-                    rpId: cache.rpId,
-                    allowCredentials: [{ type: 'public-key', id: cache.credentialId }],
-                    userVerification: 'required',
-                    timeout: 60_000,
-                },
-            },
+            requirePrf: cache.keyProtection === 'prf',
+            evaluatePrf: cache.keyProtection === 'prf',
         })
         prfSecret = assertion.prfSecret
-        if (!prfSecret || assertion.id !== cache.credentialId) {
+        if (assertion.id !== cache.credentialId || (cache.keyProtection === 'prf' && !prfSecret)) {
             throw new Error('Use the passkey that signed in to approve this action')
         }
+        const finish = await v2ApprovalFinish(begin.challengeId, (assertion.raw as { credential: unknown }).credential)
         const envelope = parseWrappedPrimaryKeyEnvelope(cache.wrappedPrimaryKey)
         if (envelope.passwordRequired) {
             password = (await args.getPassword()) ?? undefined
@@ -68,6 +73,8 @@ export async function withFreshKeys<T>(args: {
         await args.authorize()
         const derived = await deriveWrappingKey({
             prfSecret,
+            keyProtection: cache.keyProtection,
+            credentialId: cache.credentialId,
             userId: cache.userId,
             password,
             argon2idSalt: envelope.argon2id ? base64UrlToBytes(envelope.argon2id.salt) : undefined,
@@ -77,6 +84,8 @@ export async function withFreshKeys<T>(args: {
         stretched = derived.stretched
         primaryKey = await unwrapPrimaryKey({
             wrapped: cache.wrappedPrimaryKey,
+            keyProtection: cache.keyProtection,
+            credentialId: cache.credentialId,
             wrappingKeyBytes: wrappingKey,
             userId: cache.userId,
         })
@@ -87,7 +96,7 @@ export async function withFreshKeys<T>(args: {
                 userId: cache.userId,
             })
         }
-        return await args.use({ primaryKey, prfSecret, anchor, password })
+        return await args.use({ primaryKey, prfSecret, anchor, password, approvalGrant: finish.grantId })
     } finally {
         primaryKey?.fill(0)
         prfSecret?.fill(0)
