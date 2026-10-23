@@ -32,6 +32,7 @@ func TestInitWebAuthnAddsRelatedOriginRequestsFromConfiguredOrigins(t *testing.T
 	wa, err := (&Server{}).initWebAuthn()
 	require.NoError(t, err)
 	require.NotNil(t, wa)
+	assert.Equal(t, protocol.VerificationRequired, wa.Config.AuthenticatorSelection.UserVerification)
 
 	require.Equal(t, []string{
 		"https://auth.example.com",
@@ -61,6 +62,7 @@ func TestInitWebAuthnIgnoresWildcardOriginsForRelatedOriginRequests(t *testing.T
 	wa, err := (&Server{}).initWebAuthn()
 	require.NoError(t, err)
 	require.NotNil(t, wa)
+	assert.Equal(t, protocol.VerificationRequired, wa.Config.AuthenticatorSelection.UserVerification)
 
 	assert.Equal(t, []string{"https://auth.example.com"}, wa.Config.RPOrigins)
 	assert.Empty(t, wa.Config.RPTopOrigins)
@@ -88,33 +90,21 @@ func TestLogWebAuthnErrorIncludesConciseStructuredDiagnostic(t *testing.T) {
 	assert.NotContains(t, logOutput, "sensitive debug details")
 }
 
-func TestNormalizeWebAuthnPRFResultsEncodesBrowserByteArrays(t *testing.T) {
-	credential := json.RawMessage(`{"id":"credential","clientExtensionResults":{"prf":{"results":{"first":[251,255,0],"second":"AQID"}}}}`)
-
-	normalized, err := normalizeWebAuthnPRFResults(credential)
-	require.NoError(t, err)
-
-	var value struct {
-		ClientExtensionResults struct {
-			PRF struct {
-				Results struct {
-					First  string `json:"first"`
-					Second string `json:"second"`
-				} `json:"results"`
-			} `json:"prf"`
-		} `json:"clientExtensionResults"`
+func TestRejectWebAuthnSecrets(t *testing.T) {
+	for _, raw := range []string{
+		`{"clientExtensionResults":{"prf":{"results":{"first":"dummy-secret"}}}}`,
+		`{"clientExtensionResults":{"prf":{"results":{"first":[1,2,3]}}}}`,
+		`{"clientExtensionResults":{"prf":{"results":null}}}`,
+		`{"clientExtensionResults":{"hmac-secret":"dummy-secret"}}`,
+	} {
+		_, err := rejectWebAuthnSecrets(json.RawMessage(raw))
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "dummy-secret")
 	}
-	err = json.Unmarshal(normalized, &value)
+	raw := json.RawMessage(`{"id":"credential","clientExtensionResults":{"prf":{"enabled":true}}}`)
+	got, err := rejectWebAuthnSecrets(raw)
 	require.NoError(t, err)
-	assert.Equal(t, "-_8A", value.ClientExtensionResults.PRF.Results.First)
-	assert.Equal(t, "AQID", value.ClientExtensionResults.PRF.Results.Second)
-}
-
-func TestNormalizeWebAuthnPRFResultsRejectsInvalidBytes(t *testing.T) {
-	credential := json.RawMessage(`{"clientExtensionResults":{"prf":{"results":{"first":[256]}}}}`)
-
-	_, err := normalizeWebAuthnPRFResults(credential)
-	require.ErrorContains(t, err, "invalid byte")
+	assert.JSONEq(t, string(raw), string(got))
 }
 
 func TestCredentialCreationWithoutExclusionsRemovesBrowserExclusionList(t *testing.T) {

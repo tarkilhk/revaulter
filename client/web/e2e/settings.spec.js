@@ -236,6 +236,11 @@ test('passkeys tab shows credentials', async ({ page }) => {
 test('adding a passkey without PRF stops before server persistence', async ({ page }) => {
     const auth = await registerAndReachReady(page, 'Settings User')
     const incompatiblePasskey = await createVirtualPasskey(page, { hasPrf: false })
+    await auth.passkey.manager.setActive(auth.passkey.authenticatorId)
+    await page.route('**/v2/auth/credentials/add/begin', async (route) => {
+        await incompatiblePasskey.manager.setActive(incompatiblePasskey.authenticatorId)
+        await route.continue()
+    })
 
     try {
         let addCredentialFinishes = 0

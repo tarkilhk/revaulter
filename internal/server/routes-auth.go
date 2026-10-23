@@ -181,6 +181,7 @@ type v2AuthUpdateWrappedKeyRequest struct {
 }
 
 type v2AuthCredentialItem struct {
+	CredentialID    string `json:"credentialId"`
 	ID              string `json:"id"`
 	DisplayName     string `json:"displayName"`
 	WrappedKeyEpoch int64  `json:"wrappedKeyEpoch"`
@@ -1054,6 +1055,7 @@ func (s *Server) RouteV2AuthListCredentials(c *gin.Context) {
 	items := make([]v2AuthCredentialItem, len(records))
 	for i, rec := range records {
 		items[i] = v2AuthCredentialItem{
+			CredentialID:    rec.CredentialID,
 			ID:              rec.ID,
 			DisplayName:     rec.DisplayName,
 			WrappedKeyEpoch: rec.WrappedKeyEpoch,
@@ -1677,10 +1679,10 @@ func (s *Server) loginFinish(c *gin.Context, tx *db.DbTx, req v2AuthLoginFinishR
 		return userRecord, nil
 	}
 
-	// Normalize the PRF results to support passkeys created with an older version of webauthn
-	credential, err := normalizeWebAuthnPRFResults(req.Credential)
+	// Refuse PRF key material instead of accepting it in credential JSON
+	credential, err := rejectWebAuthnSecrets(req.Credential)
 	if err != nil {
-		return loginFinishRes{}, NewResponseError(http.StatusBadRequest, "Invalid WebAuthn PRF result")
+		return loginFinishRes{}, NewResponseError(http.StatusBadRequest, "Credential includes unsupported or secret extension data")
 	}
 
 	// The WebAuthn requires a *http.Request object formatted with a very specific body
@@ -2010,84 +2012,41 @@ func logWebAuthnError(ctx context.Context, ceremony string, err error) {
 	logging.LogFromContext(ctx).WarnContext(ctx, "WebAuthn ceremony failed", attrs...)
 }
 
-// normalizeWebAuthnPRFResults converts browser-produced PRF byte arrays to base64url strings
-func normalizeWebAuthnPRFResults(credential json.RawMessage) (json.RawMessage, error) {
-	var value map[string]any
+// rejectWebAuthnSecrets fails closed if a client sends key-derivation material
+// Never include credential values in errors or logs
+func rejectWebAuthnSecrets(credential json.RawMessage) (json.RawMessage, error) {
+	var value struct {
+		Extensions map[string]json.RawMessage `json:"clientExtensionResults"`
+	}
 	err := json.Unmarshal(credential, &value)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid credential JSON")
 	}
-
-	for _, path := range []string{
-		"clientExtensionResults.prf.results.first",
-		"clientExtensionResults.prf.results.second",
-	} {
-		err = normalizeWebAuthnByteArrayAtPath(value, path)
+	for name, raw := range value.Extensions {
+		if name != "prf" {
+			return nil, errors.New("unsupported credential extension")
+		}
+		var prf map[string]json.RawMessage
+		err = json.Unmarshal(raw, &prf)
 		if err != nil {
-			return nil, err
+			return nil, errors.New("invalid PRF capability")
+		}
+		for field := range prf {
+			if field != "enabled" {
+				return nil, errors.New("PRF secret material must remain on the client")
+			}
 		}
 	}
-
-	return json.Marshal(value)
-}
-
-// normalizeWebAuthnByteArrayAtPath encodes a byte array at a nested JSON path while preserving base64url strings
-func normalizeWebAuthnByteArrayAtPath(value map[string]any, path string) error {
-	parts := strings.Split(path, ".")
-	current := value
-
-	// PRF extension output is optional so a missing object means there is nothing to normalize
-	for _, part := range parts[:len(parts)-1] {
-		next, ok := current[part]
-		if !ok {
-			return nil
-		}
-
-		// Reject malformed intermediate values because silently ignoring them would defer an unclear parse error to the WebAuthn library
-		current, ok = next.(map[string]any)
-		if !ok {
-			return fmt.Errorf("%s must be an object", strings.Join(parts[:len(parts)-1], "."))
-		}
-	}
-
-	last := parts[len(parts)-1]
-	field, ok := current[last]
-	if !ok {
-		// Authenticators may omit either PRF result when no value was produced
-		return nil
-	}
-
-	// Standards-compliant clients already send base64url strings so preserve them without encoding them again
-	_, ok = field.(string)
-	if ok {
-		return nil
-	}
-
-	// Older client code can serialize browser byte buffers as JSON number arrays instead of base64url strings
-	values, ok := field.([]any)
-	if !ok {
-		return fmt.Errorf("%s must be a base64url string or byte array", path)
-	}
-
-	bytesValue := make([]byte, len(values))
-	for i, value := range values {
-		// JSON numbers decode as float64 so require an integer in the byte range before narrowing to byte
-		number, numberOK := value.(float64)
-		if !numberOK || number < 0 || number > 255 || number != math.Trunc(number) {
-			return fmt.Errorf("%s contains an invalid byte at index %d", path, i)
-		}
-		bytesValue[i] = byte(number)
-	}
-
-	// Convert the legacy array to the representation expected by the upgraded WebAuthn parser
-	current[last] = base64.RawURLEncoding.EncodeToString(bytesValue)
-
-	return nil
+	return credential, nil
 }
 
 // newJSONHTTPRequest returns a new http.Request with a JSON body
 // This is used by the WebAuthn library as input in many instances
 func newJSONHTTPRequest(c *gin.Context, raw json.RawMessage) (*http.Request, error) {
+	_, secretErr := rejectWebAuthnSecrets(raw)
+	if secretErr != nil {
+		return nil, NewResponseError(http.StatusBadRequest, "credential includes unsupported or secret extension data")
+	}
 	if len(raw) == 0 || !json.Valid(raw) {
 		return nil, NewResponseError(http.StatusBadRequest, "credential payload must be valid JSON")
 	}

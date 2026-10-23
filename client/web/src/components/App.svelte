@@ -3,6 +3,7 @@ import { onMount } from 'svelte'
 
 import AuthAccessView from '$components/AuthAccessView.svelte'
 import AuthSetupView from '$components/AuthSetupView.svelte'
+import FreshPasswordPrompt from '$components/FreshPasswordPrompt.svelte'
 import ReadyView from '$components/ReadyView.svelte'
 import UpdateAvailable from '$components/UpdateAvailable.svelte'
 import { appVersion, getServerVersion, reloadWithLatestClient, versionsMatch } from '$lib/app-version'
@@ -34,6 +35,7 @@ import {
     unwrapAnchorKey,
     wrapAnchorKey,
 } from '$lib/crypto-anchor'
+import { type WrappedKeyCache, withFreshKeys } from '$lib/fresh-unlock'
 import { ResponseNotOkError } from '$lib/request'
 import { base64UrlToBytes, bytesToBase64Url } from '$lib/utils'
 import {
@@ -97,7 +99,7 @@ let loginWrappedPrimaryKey = $state<string | null>(null)
 let sessionCredentialId = $state<string | null>(null)
 let sessionCredentialWrappedKeyEpoch = $state<number>(1)
 let loginWrappedKeyStale = $state(false)
-// The plaintext password is kept in memory while the session is active adding passkeys and the changing password can wrap new keys without re-prompting
+// The password exists only while a single key operation is running
 let sessionPassword = $state<string | null>(null)
 let allowedIpsText = $state('')
 let settingsBusy = $state(false)
@@ -110,9 +112,10 @@ let signingKeys = $state<V2PublishedSigningKey[]>([])
 let hasPassword = $state(false)
 
 let session = $state<V2SessionResponse | null>(null)
+let wrappedKeyCache = $state<WrappedKeyCache | null>(null)
 let prfSecret = $state<Uint8Array | null>(null)
 let primaryKey = $state<Uint8Array | null>(null)
-// Unwrapped hybrid anchor keypair for the current session
+// Unwrapped hybrid anchor keypair for the current action
 // Used to sign attestations when adding new credentials
 let sessionAnchor = $state<AnchorKeyPair | null>(null)
 // Wrapped anchor blob returned by the login finish response, unwrapped once we have the wrapping key
@@ -188,6 +191,81 @@ function toSessionResponse(authSession: V2AuthSessionInfo): V2SessionResponse {
     }
 }
 
+let keyOperationBusy = false
+let keyOperationEpoch = 0
+let passwordPrompt = $state<((value: string | null) => void) | null>(null)
+
+function clearUnlockedKeys() {
+    primaryKey?.fill(0)
+    prfSecret?.fill(0)
+    sessionAnchor?.mldsa87.seed.fill(0)
+    primaryKey = null
+    prfSecret = null
+    sessionAnchor = null
+    sessionPassword = null
+}
+
+async function withFreshLocalKeys<T>(use: () => Promise<T>): Promise<T> {
+    if (keyOperationBusy || !session || !sessionCredentialId || !wrappedKeyCache) {
+        throw new Error('Finish the current verification before starting another action')
+    }
+    keyOperationBusy = true
+    const operationEpoch = keyOperationEpoch
+    const expectedUserId = session.userId
+    try {
+        return await withFreshKeys({
+            cache: wrappedKeyCache,
+            authorize: async () => {
+                const active = await v2Session()
+                const activeCredentials = await v2ListCredentials()
+                const credential = activeCredentials.find((item) => item.credentialId === sessionCredentialId)
+                if (
+                    operationEpoch !== keyOperationEpoch ||
+                    active.userId !== expectedUserId ||
+                    !credential ||
+                    credential.wrappedKeyEpoch !== wrappedKeyCache?.wrappedKeyEpoch
+                ) {
+                    throw new Error('The session or passkey changed; sign in again before approving')
+                }
+                session = active
+            },
+            getPassword: () =>
+                new Promise((resolve) => {
+                    passwordPrompt = resolve
+                }),
+            use: async (keys) => {
+                if (operationEpoch !== keyOperationEpoch || session?.userId !== expectedUserId || uiState !== 'ready') {
+                    throw new Error('The approval session ended; sign in and try again')
+                }
+                primaryKey = keys.primaryKey
+                prfSecret = keys.prfSecret
+                sessionAnchor = keys.anchor
+                sessionPassword = keys.password ?? null
+                return await use()
+            },
+        })
+    } finally {
+        passwordPrompt = null
+        clearUnlockedKeys()
+        keyOperationBusy = false
+    }
+}
+
+async function withApprovalKey<T>(use: (key: Uint8Array) => Promise<T>): Promise<T> {
+    return await withFreshLocalKeys(async () => {
+        if (!primaryKey) {
+            throw new Error('Fresh passkey verification did not unlock a key')
+        }
+        return await use(primaryKey)
+    })
+}
+
+function answerPasswordPrompt(value: string | null) {
+    const resolve = passwordPrompt
+    passwordPrompt = null
+    resolve?.(value)
+}
+
 function setPrfSecret(v: Uint8Array) {
     prfSecret = v
 }
@@ -202,8 +280,12 @@ async function teardownListStream() {
 }
 
 function clearLocalAuthState() {
+    keyOperationEpoch += 1
+    answerPasswordPrompt(null)
+    clearUnlockedKeys()
     void teardownListStream()
     session = null
+    wrappedKeyCache = null
     prfSecret = null
     primaryKey = null
     sessionAnchor = null
@@ -221,6 +303,7 @@ function clearLocalAuthState() {
 }
 
 function enterReadyView() {
+    clearUnlockedKeys()
     uiState = 'ready'
     passwordInput = ''
     authError = null
@@ -293,6 +376,16 @@ async function beginPasskeyLoginStep(): Promise<'authenticated' | 'password-requ
     session = toSessionResponse(finish.session)
     setPrfSecret(assertion.prfSecret)
     sessionCredentialId = assertion.id
+    const publicKey = (begin.options as { publicKey?: { rpId?: string } })?.publicKey
+    wrappedKeyCache = {
+        userId: finish.session.userId,
+        credentialId: assertion.id,
+        rpId: publicKey?.rpId ?? window.location.hostname,
+        basePrfSalt: begin.basePrfSalt,
+        wrappedPrimaryKey: finish.wrappedPrimaryKey ?? null,
+        wrappedAnchorKey: finish.wrappedAnchorKey ?? null,
+        wrappedKeyEpoch: finish.credentialWrappedKeyEpoch ?? finish.session.wrappedKeyEpoch,
+    }
     sessionCredentialWrappedKeyEpoch = finish.credentialWrappedKeyEpoch ?? finish.session.wrappedKeyEpoch
     loginWrappedPrimaryKey = finish.wrappedPrimaryKey ?? null
     loginWrappedAnchorKey = finish.wrappedAnchorKey ?? null
@@ -393,7 +486,7 @@ async function unlockWithPassword(password: string) {
     loginWrappedPrimaryKey = null
     loginWrappedAnchorKey = null
 
-    // Keep the password in memory for the rest of the session so we can re-wrap the primary key when adding new passkeys or changing credentials without re-prompting
+    // Retain only until this login action completes; enterReadyView clears it
     sessionPassword = password
 }
 
@@ -596,10 +689,19 @@ async function doSetPassword() {
         session = await v2Session()
         primaryKey = pk
         sessionAnchor = anchor
+        if (!wrappedKeyCache) {
+            throw new Error('Missing public credential metadata for signup')
+        }
+        wrappedKeyCache = {
+            ...wrappedKeyCache,
+            wrappedPrimaryKey: wrapped,
+            wrappedAnchorKey: wrappedAnchor,
+            wrappedKeyEpoch: 1,
+        }
         hasPassword = !!passwordInput
         pendingCredentialPublicKeyHash = null
 
-        // Remember the password used during signup so subsequent add-passkey operations can wrap the new credential with the same password
+        // enterReadyView clears this temporary signup password
         sessionPassword = passwordInput || null
         loginWrappedPrimaryKey = null
         loginWrappedAnchorKey = null
@@ -748,6 +850,10 @@ async function doLoadSigningKeys() {
 }
 
 async function doDeriveSigningKey(keyLabel: string, algorithm: string): Promise<DerivedSigningKey> {
+    return await withFreshLocalKeys(() => doDeriveSigningKeyUnlocked(keyLabel, algorithm))
+}
+
+async function doDeriveSigningKeyUnlocked(keyLabel: string, algorithm: string): Promise<DerivedSigningKey> {
     if (!session || !primaryKey) {
         throw new Error('Missing local key material')
     }
@@ -782,7 +888,19 @@ async function doDeriveSigningKey(keyLabel: string, algorithm: string): Promise<
     return { keyLabel, algorithm, jwk: publicJwk, pem, sshPublicKey, id }
 }
 
-async function doPublishSigningKey(derived: DerivedSigningKey) {
+async function doPublishSigningKey(derived: DerivedSigningKey): Promise<void> {
+    settingsBusy = true
+    settingsError = null
+    try {
+        await withFreshLocalKeys(() => doPublishSigningKeyUnlocked(derived))
+    } catch (err) {
+        settingsError = err instanceof Error ? err.message : String(err)
+    } finally {
+        settingsBusy = false
+    }
+}
+
+async function doPublishSigningKeyUnlocked(derived: DerivedSigningKey) {
     settingsBusy = true
     settingsError = null
     settingsSuccess = null
@@ -885,7 +1003,19 @@ async function doUpdateDisplayName(name: string) {
     }
 }
 
-async function doAddPasskey(name: string) {
+async function doAddPasskey(name: string): Promise<void> {
+    settingsBusy = true
+    settingsError = null
+    try {
+        await withFreshLocalKeys(() => doAddPasskeyUnlocked(name))
+    } catch (err) {
+        settingsError = err instanceof Error ? err.message : String(err)
+    } finally {
+        settingsBusy = false
+    }
+}
+
+async function doAddPasskeyUnlocked(name: string) {
     if (!session || !primaryKey) {
         settingsError = 'Missing local key material'
         return
@@ -913,7 +1043,7 @@ async function doAddPasskey(name: string) {
             options: {
                 publicKey: {
                     allowCredentials: [{ type: 'public-key', id: cred.id }],
-                    userVerification: 'preferred',
+                    userVerification: 'required',
                 },
             },
         })
@@ -921,7 +1051,7 @@ async function doAddPasskey(name: string) {
             throw new Error('Authenticator did not return PRF output for the new credential')
         }
 
-        // Derive the wrapping key for the new credential, re-using the current session password (if any) so all passkeys added while signed in share the same password gate
+        // Wrap the new credential using the password supplied for this action
         const password = sessionPassword ?? undefined
         const {
             wrappingKeyBytes,
@@ -1014,7 +1144,19 @@ async function doDeletePasskey(id: string) {
     }
 }
 
-async function doChangePassword(password: string) {
+async function doChangePassword(password: string): Promise<void> {
+    settingsBusy = true
+    settingsError = null
+    try {
+        await withFreshLocalKeys(() => doChangePasswordUnlocked(password))
+    } catch (err) {
+        settingsError = err instanceof Error ? err.message : String(err)
+    } finally {
+        settingsBusy = false
+    }
+}
+
+async function doChangePasswordUnlocked(password: string) {
     if (!prfSecret || !session || !primaryKey || !sessionCredentialId || !sessionAnchor) {
         settingsError = 'Missing local key material'
         return
@@ -1053,10 +1195,21 @@ async function doChangePassword(password: string) {
         })
 
         await v2UpdateWrappedKey(sessionCredentialId, wrapped, wrappedAnchor, true)
+        session = await v2Session()
+        if (!wrappedKeyCache) {
+            throw new Error('Sign in again to refresh the encrypted key wrapper')
+        }
+        wrappedKeyCache = {
+            ...wrappedKeyCache,
+            wrappedPrimaryKey: wrapped,
+            wrappedAnchorKey: wrappedAnchor,
+            wrappedKeyEpoch: session.wrappedKeyEpoch,
+        }
+        sessionCredentialWrappedKeyEpoch = session.wrappedKeyEpoch
         await doLoadCredentials()
         hasPassword = !!password
 
-        // Keep the new password in memory so subsequent add-passkey calls wrap with it (or clear it when removed)
+        // The action cleanup clears this temporary password
         sessionPassword = password || null
         settingsSuccess = password
             ? 'Password updated for this passkey. Other passkeys will ask to refresh on next use.'
@@ -1151,6 +1304,10 @@ function sortedItems() {
 }
 </script>
 
+{#if passwordPrompt}
+    <FreshPasswordPrompt onAnswer={answerPasswordPrompt} />
+{/if}
+
 <div class="min-h-screen">
     {#if serverVersion}
         <UpdateAvailable clientVersion={appVersion} onReload={reloadForUpdate} {serverVersion} />
@@ -1183,7 +1340,7 @@ function sortedItems() {
             onUpdateDisplayName={doUpdateDisplayName}
             pageError={pageError}
             pendingItems={sortedItems()}
-            {primaryKey}
+            withApprovalKey={withApprovalKey}
             requestKey={session?.requestKey ?? ''}
             requestKeyEnabled={session?.requestKeyEnabled ?? true}
             requestOidcEnabled={session?.requestOidcEnabled ?? false}

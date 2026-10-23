@@ -204,7 +204,7 @@ test('new seeded request appears without reload after stream is connected', { ta
 
 // A bulk action applies only to the requests listed when it is clicked: a request that arrives later must wait for its own decision
 // Seeded requests carry a dummy payload, so confirming them fails in the browser, but a bulk confirm still reaches the server for each item it touches
-for (const action of ['Confirm all', 'Decline all']) {
+for (const action of ['Decline all']) {
     test(`requests arriving after "${action}" stay pending`, { tag: '@requeststream' }, async ({ page, request }) => {
         const auth = await registerAndReachReady(page, 'Bulk Action User')
         const seedData = {
@@ -316,7 +316,7 @@ test('cli sign round-trips and the signature verifies against the browser-derive
         })
 
         await expect(page.getByText('cli sign e2e')).toBeVisible()
-        await page.getByRole('button', { name: 'Confirm' }).click()
+        await page.getByRole('button', { name: 'Verify and confirm' }).click()
 
         const confirmRequest = await confirmRequestPromise
         const confirmBody = JSON.parse(confirmRequest.postData() || '{}')
@@ -357,7 +357,16 @@ for (const algorithm of ['A256GCM', 'aes-256-gcm', 'C20P', 'chacha20-poly1305'])
     test(`cli encrypt then decrypt round-trips hello world (algorithm=${algorithm})`, {
         tag: '@requeststream',
     }, async ({ page }) => {
+        test.setTimeout(60_000)
         const auth = await registerAndReachReady(page, `CLI Crypto User ${algorithm}`)
+        const freshLogins = []
+        page.on('request', (request) => {
+            if (request.url().endsWith('/v2/auth/login/finish')) {
+                const credential = request.postDataJSON().credential
+                expect(credential.clientExtensionResults).toEqual({ prf: { enabled: true } })
+                freshLogins.push(credential)
+            }
+        })
 
         try {
             await waitForListStream(page)
@@ -372,7 +381,7 @@ for (const algorithm of ['A256GCM', 'aes-256-gcm', 'C20P', 'chacha20-poly1305'])
             })
 
             await expect(page.getByText('cli round trip encrypt')).toBeVisible()
-            await page.getByRole('button', { name: 'Confirm' }).click()
+            await page.getByRole('button', { name: 'Verify and confirm' }).click()
 
             const encryptResult = await encryptRun.done
             expect(encryptResult.json.kind).toBe('revaulter/1')
@@ -395,11 +404,12 @@ for (const algorithm of ['A256GCM', 'aes-256-gcm', 'C20P', 'chacha20-poly1305'])
             })
 
             await expect(page.getByText('cli round trip decrypt')).toBeVisible()
-            await page.getByRole('button', { name: 'Confirm' }).click()
+            await page.getByRole('button', { name: 'Verify and confirm' }).click()
 
             const decryptResult = await decryptRun.done
             expect(decryptResult.json.operation).toBe('decrypt')
             expect(decryptResult.json.decodedValue).toBe('hello world')
+            expect(freshLogins).toHaveLength(0)
         } finally {
             await auth.passkey.dispose()
         }

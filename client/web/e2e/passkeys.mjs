@@ -11,6 +11,7 @@ export async function createVirtualPasskey(page, options = {}) {
     await manager.setActive(authenticatorId)
     return {
         authenticatorId,
+        manager,
         async dispose() {
             await manager.dispose()
         },

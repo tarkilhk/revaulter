@@ -47,7 +47,7 @@ test('user can register and save a password', async ({ page }) => {
     }
 })
 
-test('passwordless ready user logs in directly to ready view with base64url PRF output', async ({ page }) => {
+test('passwordless login never transmits PRF output', async ({ page }) => {
     const passkey = await registerThroughUI(page, 'Passwordless User')
 
     try {
@@ -62,9 +62,7 @@ test('passwordless ready user logs in directly to ready view with base64url PRF 
         })
         await page.getByRole('button', { name: 'Continue with passkey' }).click()
         const requestBody = (await loginRequest).postDataJSON()
-        const first = requestBody.credential.clientExtensionResults.prf.results.first
-        expect(typeof first).toBe('string')
-        expect(first).toMatch(/^[A-Za-z0-9_-]+$/)
+        expect(requestBody.credential.clientExtensionResults).toEqual({ prf: { enabled: true } })
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
     } finally {
         await passkey.dispose()

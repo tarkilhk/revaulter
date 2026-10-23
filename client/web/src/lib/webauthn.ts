@@ -47,50 +47,14 @@ function cloneAndDecodeWebAuthnOptions<T>(input: T, skipBinaryDecoding = false):
     return input
 }
 
+// Only the public PRF capability bit belongs in a server-bound credential
+// PRF results and other extension secrets must remain on the client
 export function serializeWebAuthnExtensionResults(input: unknown): unknown {
-    return serializeWebAuthnExtensionValue(input, [])
-}
-
-// serializeWebAuthnExtensionValue recursively serializes one WebAuthn extension value
-// Browsers expose extension output with inconsistent binary representations so each representation is handled explicitly
-function serializeWebAuthnExtensionValue(input: unknown, path: string[]): unknown {
-    // Use the intrinsic tag because ArrayBuffers created in another window do not pass the local instanceof check
-    if (Object.prototype.toString.call(input) === '[object ArrayBuffer]') {
-        return bytesToBase64Url(new Uint8Array(input as ArrayBuffer))
+    const extensions = input as { prf?: { enabled?: unknown } } | null
+    if (typeof extensions?.prf?.enabled === 'boolean') {
+        return { prf: { enabled: extensions.prf.enabled } }
     }
-
-    // ArrayBuffer.isView covers typed arrays and DataView values returned by browser implementations
-    if (ArrayBuffer.isView(input)) {
-        // Copy only the view range because its backing buffer may contain unrelated bytes before or after the value
-        const bytes = new Uint8Array(input.byteLength)
-        bytes.set(new Uint8Array(input.buffer, input.byteOffset, input.byteLength))
-        return bytesToBase64Url(bytes)
-    }
-
-    // Some browsers turn PRF buffers into ordinary number arrays while building the credential JSON
-    if (Array.isArray(input)) {
-        // Restrict this compatibility conversion to PRF result fields so legitimate arrays from other extensions keep their shape
-        const isPrfResult =
-            path.length === 3 &&
-            path[0] === 'prf' &&
-            path[1] === 'results' &&
-            (path[2] === 'first' || path[2] === 'second')
-        if (isPrfResult && input.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
-            return bytesToBase64Url(Uint8Array.from(input as number[]))
-        }
-
-        // Preserve non-binary arrays and continue recursively in case they contain nested binary values
-        return input.map((value, index) => serializeWebAuthnExtensionValue(value, [...path, String(index)]))
-    }
-
-    // Extension output is an open-ended dictionary so recurse instead of enumerating known extension names
-    if (input !== null && typeof input === 'object') {
-        return Object.fromEntries(
-            Object.entries(input).map(([key, value]) => [key, serializeWebAuthnExtensionValue(value, [...path, key])])
-        )
-    }
-
-    return input
+    return {}
 }
 
 // serializePublicKeyCredential converts a browser credential to the JSON shape expected by the server
@@ -228,6 +192,7 @@ export async function webauthnLoginWithPrf(args: {
     const effectivePublicKey: PublicKeyCredentialRequestOptions = reqOptions
         ? {
               ...reqOptions,
+              userVerification: 'required',
               challenge: asBuf(base64UrlToBytes(args.challenge)),
               extensions: {
                   ...(reqOptions.extensions || {}),
@@ -241,7 +206,7 @@ export async function webauthnLoginWithPrf(args: {
         : {
               challenge: asBuf(base64UrlToBytes(args.challenge)),
               timeout: 60_000,
-              userVerification: 'preferred',
+              userVerification: 'required',
               extensions: {
                   prf: {
                       eval: {
@@ -260,6 +225,10 @@ export async function webauthnLoginWithPrf(args: {
     }
 
     const resp = assertion.response as AuthenticatorAssertionResponse
+    const authenticatorData = new Uint8Array(resp.authenticatorData)
+    if (authenticatorData.length < 37 || (authenticatorData[32] & 0x04) === 0) {
+        throw new Error('User verification is required')
+    }
     const ext = assertion.getClientExtensionResults() as {
         prf?: {
             enabled?: boolean

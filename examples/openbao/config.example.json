@@ -1,0 +1,11 @@
+{
+  "openbao_url": "https://openbao.example.net:8200",
+  "ca_file": "/etc/openbao-worker/openbao-ca.pem",
+  "revaulter_url": "https://approve.example.net",
+  "cli": "/usr/local/bin/revaulter-cli",
+  "envelope": "/etc/openbao-worker/unseal.enc.json",
+  "key_label": "openbao-unseal",
+  "request_key_file": "/etc/openbao-worker/request-key",
+  "trust_store": "/etc/openbao-worker/trust.json",
+  "lock_file": "/run/openbao-worker/unseal.lock"
+}
