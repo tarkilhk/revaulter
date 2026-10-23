@@ -342,6 +342,8 @@ func (s *Server) initAppServer(log *slog.Logger) (err error) {
 	v2AuthGroup.POST("/credentials/add/finish", sessionReadyMw, s.RouteV2AuthAddCredentialFinish)
 	v2AuthGroup.POST("/credentials/rename", sessionReadyMw, s.RouteV2AuthRenameCredential)
 	v2AuthGroup.POST("/credentials/delete", sessionReadyMw, s.RouteV2AuthDeleteCredential)
+	v2AuthGroup.POST("/approval/begin", sessionReadyMw, s.RouteV2AuthApprovalBegin)
+	v2AuthGroup.POST("/approval/finish", sessionReadyMw, s.RouteV2AuthApprovalFinish)
 	v2AuthGroup.POST("/logout", sessionMw, s.RouteV2AuthLogout)
 
 	// Add test routes if any

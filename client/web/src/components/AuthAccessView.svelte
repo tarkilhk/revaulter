@@ -8,6 +8,7 @@ import Logo from '$components/Logo.svelte'
 import TextField from '$components/TextField.svelte'
 
 interface Props {
+    keyProtection: 'prf' | 'bitwarden'
     authBusy: boolean
     authError: string | null
     loginWrappedPrimaryKey: string | null
@@ -24,6 +25,7 @@ interface Props {
 }
 
 let {
+    keyProtection,
     authBusy,
     authError,
     loginWrappedPrimaryKey,
@@ -41,14 +43,16 @@ let {
 
 function authHeadline() {
     if (uiState === 'password-login') {
-        return 'Unlock with your password'
+        return keyProtection === 'bitwarden' ? 'Unlock with Bitwarden' : 'Unlock with your password'
     }
     return 'Sign in to Revaulter'
 }
 
 function authBodyCopy() {
     if (uiState === 'password-login') {
-        return 'Your session is active. Enter the password to unlock local cryptographic operations in this browser.'
+        return keyProtection === 'bitwarden'
+            ? 'Autofill the unlock secret from your Revaulter Bitwarden login item. It stays in this browser and is cleared after this action.'
+            : 'Your session is active. Enter the password to unlock local cryptographic operations in this browser.'
     }
     return 'Authenticate with your passkey to access pending operations.'
 }
@@ -115,9 +119,10 @@ $effect(() => {
                     </div>
 
                     <div class="space-y-2">
-                        <label class="block text-sm font-medium text-neutral-900 dark:text-neutral-100" for="password-login">Password</label>
+                        <label class="block text-sm font-medium text-neutral-900 dark:text-neutral-100" for="password-login">{keyProtection === 'bitwarden' ? 'Unlock secret' : 'Password'}</label>
                         <TextField
                             id="password-login"
+                            autocomplete="current-password"
                             type="password"
                             value={passwordInput}
                             oninput={(event) => {

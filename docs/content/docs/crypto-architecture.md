@@ -109,6 +109,16 @@ It is derived from two factors:
 - Required factor: `prfSecret` from WebAuthn PRF
 - Optional factor: user password
 
+### Explicit Bitwarden protection
+
+Credentials registered with `keyProtection=bitwarden` use a separate version-2 primary-key envelope. The browser generates a 32-byte random unlock secret encoded as 43 base64url characters for storage in the dedicated Bitwarden login item. An ordinary WebAuthn passkey performs authentication with required user verification; it is never used as key-derivation material.
+
+The existing Argon2id implementation stretches that secret with a fresh 16-byte salt. HKDF-SHA-256 expands the stretched result using the owner, SHA-256 credential-ID binding, `mode=bitwarden` and version 2 in its domain separator. AES-256-GCM authenticates the same identity/mode/version fields as additional data when wrapping the primary key. The anchor wrapper uses that same credential-specific wrapping key. The version-2 metadata stores a fixed-size SHA-256 credential-ID binding so long passkey IDs fit the unchanged 512-byte envelope limit; the KDF and AEAD authenticate that same digest of the full credential ID. The browser bounds Argon2 parameters before executing them and rejects a wrapper whose version or credential does not match the server-stored explicit mode.
+
+Version-1 PRF envelopes and their derivation remain unchanged. The server stores each credential's mode at registration and rejects a mismatched wrapper on signup, addition or update. There is no automatic downgrade on missing PRF output. The Bitwarden secret is an encryption factor, not a server password: no plaintext or password verifier is transmitted. A stolen secret plus wrapper permits offline decryption; server-verified WebAuthn is authorization, not an additional cryptographic wrapping factor in this mode.
+
+Each approval starts with a fresh server challenge. The resulting two-minute grant binds the owner, credential/public key, both key epochs and the exact pending request. Grant consumption, live revocation checks and response insertion are atomic. Credential addition carries the approving identity into the registration challenge and rechecks it at finish. Browser code retains only encrypted wrappers between operations.
+
 ### Without a password
 
 When the user has no password configured, the wrapping key is derived directly from the PRF output with HKDF-SHA-256:

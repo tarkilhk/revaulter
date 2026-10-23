@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type WrappedKeyCache, withFreshKeys } from '$lib/fresh-unlock'
 
 const mocks = vi.hoisted(() => ({
+    begin: vi.fn(),
+    finish: vi.fn(),
     passkey: vi.fn(),
     derive: vi.fn(),
     unwrap: vi.fn(),
@@ -9,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     parse: vi.fn(),
     authorize: vi.fn(),
 }))
+vi.mock('$lib/v2-api', () => ({ v2ApprovalBegin: mocks.begin, v2ApprovalFinish: mocks.finish }))
 vi.mock('$lib/webauthn', () => ({ webauthnLoginWithPrf: mocks.passkey }))
 vi.mock('$lib/crypto', () => ({
     deriveWrappingKey: mocks.derive,
@@ -18,6 +21,7 @@ vi.mock('$lib/crypto', () => ({
 vi.mock('$lib/crypto-anchor', () => ({ unwrapAnchorKey: mocks.anchor }))
 
 const cache: WrappedKeyCache = {
+    keyProtection: 'prf',
     userId: 'user',
     credentialId: 'credential',
     rpId: 'example.com',
@@ -29,6 +33,16 @@ const cache: WrappedKeyCache = {
 
 beforeEach(() => {
     vi.resetAllMocks()
+    mocks.begin.mockImplementation(async () => ({
+        challengeId: crypto.randomUUID(),
+        challenge: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'),
+        keyProtection: 'prf',
+        wrappedKeyEpoch: 1,
+        options: {
+            publicKey: { rpId: 'example.com', userVerification: 'required', allowCredentials: [{ id: 'credential' }] },
+        },
+    }))
+    mocks.finish.mockResolvedValue({ grantId: 'single-use-grant' })
     mocks.authorize.mockResolvedValue(undefined)
     mocks.passkey.mockImplementation(async () => ({
         id: 'credential',
@@ -57,7 +71,10 @@ describe('one action per fresh local unlock', () => {
         for (let i = 0; i < 6; i += 1) {
             await unlock(async (keys) => {
                 expect(keys.primaryKey[0]).toBe(10)
-                retained.push(keys.primaryKey, keys.prfSecret)
+                retained.push(keys.primaryKey)
+                if (keys.prfSecret) {
+                    retained.push(keys.prfSecret)
+                }
             })
             for (const bytes of retained) {
                 expect(bytes.every((value) => value === 0)).toBe(true)
@@ -113,7 +130,7 @@ describe('one action per fresh local unlock', () => {
 
     it('checks session and credential revocation again after the phone ceremony', async () => {
         const prf = new Uint8Array(32).fill(7)
-        mocks.passkey.mockResolvedValue({ id: 'credential', prfSecret: prf })
+        mocks.passkey.mockResolvedValue({ id: 'credential', prfSecret: prf, raw: { credential: {} } })
         mocks.authorize.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('revoked'))
         const use = vi.fn()
         await expect(unlock(use)).rejects.toThrow('revoked')
@@ -127,6 +144,52 @@ describe('one action per fresh local unlock', () => {
         const use = vi.fn()
         await expect(unlock(use)).rejects.toThrow('Approval canceled')
         expect(use).not.toHaveBeenCalled()
+        expect(mocks.unwrap).not.toHaveBeenCalled()
+    })
+})
+
+describe('explicit Bitwarden approval', () => {
+    it('requires server verification before decrypting and never sends the unlock secret', async () => {
+        const secret = 'dummy-local-unlock-secret'
+        mocks.begin.mockResolvedValue({
+            challengeId: 'challenge',
+            challenge: 'AQID',
+            keyProtection: 'bitwarden',
+            wrappedKeyEpoch: 1,
+            options: {},
+        })
+        mocks.passkey.mockResolvedValue({ id: 'credential', raw: { credential: { id: 'credential' } } })
+        mocks.parse.mockReturnValue({ passwordRequired: true })
+        await withFreshKeys({
+            cache: { ...cache, keyProtection: 'bitwarden' },
+            requestState: 'request-1',
+            authorize: mocks.authorize,
+            getPassword: async () => secret,
+            use: async (keys) => {
+                expect(keys.approvalGrant).toBe('single-use-grant')
+            },
+        })
+        expect(mocks.begin).toHaveBeenCalledWith('credential', 'request-1', undefined)
+        expect(mocks.finish).toHaveBeenCalledWith('challenge', { id: 'credential' })
+        expect(JSON.stringify([mocks.begin.mock.calls, mocks.finish.mock.calls])).not.toContain(secret)
+        expect(mocks.finish.mock.invocationCallOrder[0]).toBeLessThan(mocks.unwrap.mock.invocationCallOrder[0])
+    })
+    it('fails closed on a server mode mismatch', async () => {
+        const use = vi.fn()
+        await expect(
+            withFreshKeys({
+                cache: { ...cache, keyProtection: 'bitwarden' },
+                authorize: mocks.authorize,
+                getPassword: async () => 'secret',
+                use,
+            })
+        ).rejects.toThrow('Credential protection changed')
+        expect(use).not.toHaveBeenCalled()
+        expect(mocks.passkey).not.toHaveBeenCalled()
+    })
+    it('does not unwrap after failed server verification', async () => {
+        mocks.finish.mockRejectedValue(new Error('UV verification failed'))
+        await expect(unlock(vi.fn())).rejects.toThrow('UV verification failed')
         expect(mocks.unwrap).not.toHaveBeenCalled()
     })
 })

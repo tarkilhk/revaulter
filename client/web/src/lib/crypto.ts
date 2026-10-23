@@ -168,7 +168,9 @@ export async function generatePrimaryKey(): Promise<Uint8Array> {
  * Serialized as compact JSON then base64url-encoded for storage
  */
 export type WrappedPrimaryKeyEnvelope = {
-    v: 1
+    v: 1 | 2
+    mode?: 'bitwarden'
+    credentialHash?: string
     passwordRequired: boolean
     argon2id?: {
         m: number
@@ -186,7 +188,9 @@ export type WrappedPrimaryKeyEnvelope = {
  * The Argon2id cost MUST be supplied by the caller: use the build-time `argon2idCost` constant for fresh wraps, or the cost stored inside the envelope being unwrapped
  */
 export async function deriveWrappingKey(params: {
-    prfSecret: Uint8Array
+    prfSecret?: Uint8Array | null
+    keyProtection?: 'prf' | 'bitwarden'
+    credentialId?: string
     userId: string
     password?: string
     argon2idSalt?: Uint8Array
@@ -197,6 +201,19 @@ export async function deriveWrappingKey(params: {
     argon2idSalt?: Uint8Array
     argon2idCost?: Argon2idCost
 }> {
+    const mode = params.keyProtection ?? 'prf'
+    if (mode !== 'prf' && mode !== 'bitwarden') {
+        throw new Error('Unsupported key protection')
+    }
+    if (
+        mode === 'bitwarden' &&
+        (!params.credentialId || !params.password || !/^[A-Za-z0-9_-]{43}$/.test(params.password))
+    ) {
+        throw new Error('Use the generated 43-character Bitwarden unlock secret')
+    }
+    if (mode === 'prf' && params.prfSecret?.length !== 32) {
+        throw new Error('PRF output is required')
+    }
     let hkdfSalt: BufferSource = new Uint8Array()
     let stretched: Uint8Array | undefined
     let usedArgon2idSalt: Uint8Array | undefined
@@ -207,6 +224,7 @@ export async function deriveWrappingKey(params: {
             throw new Error('argon2idCost is required when a password is provided')
         }
 
+        validateArgon2id(params.argon2idCost)
         usedArgon2idSalt = params.argon2idSalt ?? crypto.getRandomValues(new Uint8Array(16))
         usedArgon2idCost = params.argon2idCost
         stretched = await argon2id.async(params.password, usedArgon2idSalt, {
@@ -218,25 +236,41 @@ export async function deriveWrappingKey(params: {
         hkdfSalt = asBuf(stretched)
     }
 
-    const ikm = await crypto.subtle.importKey('raw', asBuf(params.prfSecret), 'HKDF', false, ['deriveBits'])
-    const info = new TextEncoder().encode(`revaulter/v2/primaryKeyWrap\nuserId=${params.userId}\nv=1`)
+    try {
+        const material = mode === 'bitwarden' ? stretched : params.prfSecret
+        if (!material) {
+            throw new Error('Missing wrapping key material')
+        }
+        const ikm = await crypto.subtle.importKey('raw', asBuf(material), 'HKDF', false, ['deriveBits'])
+        if (mode === 'bitwarden') {
+            hkdfSalt = new Uint8Array()
+        }
+        const info = new TextEncoder().encode(
+            mode === 'bitwarden'
+                ? `revaulter/v2/primaryKeyWrap\nuserId=${params.userId}\ncredentialHash=${await credentialBindingHash(params.credentialId ?? '')}\nmode=bitwarden\nv=2`
+                : `revaulter/v2/primaryKeyWrap\nuserId=${params.userId}\nv=1`
+        )
 
-    const bits = await crypto.subtle.deriveBits(
-        {
-            name: 'HKDF',
-            hash: 'SHA-256',
-            salt: hkdfSalt,
-            info: asBuf(info),
-        },
-        ikm,
-        256
-    )
+        const bits = await crypto.subtle.deriveBits(
+            {
+                name: 'HKDF',
+                hash: 'SHA-256',
+                salt: hkdfSalt,
+                info: asBuf(info),
+            },
+            ikm,
+            256
+        )
 
-    return {
-        wrappingKeyBytes: new Uint8Array(bits),
-        stretched,
-        argon2idSalt: usedArgon2idSalt,
-        argon2idCost: usedArgon2idCost,
+        return {
+            wrappingKeyBytes: new Uint8Array(bits),
+            stretched,
+            argon2idSalt: usedArgon2idSalt,
+            argon2idCost: usedArgon2idCost,
+        }
+    } catch (error) {
+        stretched?.fill(0)
+        throw error
     }
 }
 
@@ -248,6 +282,8 @@ export async function wrapPrimaryKey(params: {
     wrappingKeyBytes: Uint8Array
     userId: string
     passwordRequired: boolean
+    keyProtection?: 'prf' | 'bitwarden'
+    credentialId?: string
     argon2idSalt?: Uint8Array
     argon2idCost?: Argon2idCost
 }): Promise<string> {
@@ -259,7 +295,11 @@ export async function wrapPrimaryKey(params: {
         ['encrypt']
     )
     const nonce = crypto.getRandomValues(new Uint8Array(12))
-    const aad = new TextEncoder().encode(`revaulter/v2/wrapped-primary-key\nuserId=${params.userId}\nv=1`)
+    const mode = params.keyProtection ?? 'prf'
+    if (mode === 'bitwarden' && (!params.credentialId || !params.passwordRequired)) {
+        throw new Error('Bitwarden wrapping requires credential and unlock secret')
+    }
+    const aad = await primaryKeyAAD(params.userId, mode, params.credentialId)
 
     const ciphertext = await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv: asBuf(nonce), additionalData: asBuf(aad) },
@@ -268,7 +308,10 @@ export async function wrapPrimaryKey(params: {
     )
 
     const envelope: WrappedPrimaryKeyEnvelope = {
-        v: 1,
+        v: mode === 'bitwarden' ? 2 : 1,
+        ...(mode === 'bitwarden'
+            ? { mode: 'bitwarden' as const, credentialHash: await credentialBindingHash(params.credentialId ?? '') }
+            : {}),
         passwordRequired: params.passwordRequired,
         nonce: bytesToBase64Url(nonce),
         ciphertext: bytesToBase64Url(ciphertext),
@@ -298,8 +341,20 @@ export function parseWrappedPrimaryKeyEnvelope(wrapped: string): WrappedPrimaryK
     const json = new TextDecoder().decode(base64UrlToBytes(wrapped))
     const envelope = JSON.parse(json) as WrappedPrimaryKeyEnvelope
 
-    if (envelope.v !== 1) {
+    if (envelope.v !== 1 && envelope.v !== 2) {
         throw new Error(`Unsupported wrapped key version: ${envelope.v}`)
+    }
+    if (envelope.v === 1 && (envelope.mode !== undefined || envelope.credentialHash !== undefined)) {
+        throw new Error('Invalid PRF envelope metadata')
+    }
+    if (
+        envelope.v === 2 &&
+        (envelope.mode !== 'bitwarden' ||
+            !envelope.credentialHash ||
+            !/^[A-Za-z0-9_-]{43}$/.test(envelope.credentialHash) ||
+            !envelope.passwordRequired)
+    ) {
+        throw new Error('Invalid Bitwarden envelope metadata')
     }
     if (typeof envelope.passwordRequired !== 'boolean') {
         throw new Error('Invalid wrapped key envelope: missing passwordRequired')
@@ -320,6 +375,12 @@ export function parseWrappedPrimaryKeyEnvelope(wrapped: string): WrappedPrimaryK
         }
     }
 
+    if (envelope.argon2id) {
+        validateArgon2id(envelope.argon2id)
+        if (base64UrlToBytes(envelope.argon2id.salt).length !== 16) {
+            throw new Error('Invalid Argon2id salt')
+        }
+    }
     return envelope
 }
 
@@ -331,8 +392,18 @@ export async function unwrapPrimaryKey(params: {
     wrapped: string
     wrappingKeyBytes: Uint8Array
     userId: string
+    keyProtection?: 'prf' | 'bitwarden'
+    credentialId?: string
 }): Promise<Uint8Array> {
     const envelope = parseWrappedPrimaryKeyEnvelope(params.wrapped)
+    const mode = params.keyProtection ?? 'prf'
+    if (
+        (mode === 'prf' && envelope.v !== 1) ||
+        (mode === 'bitwarden' &&
+            (envelope.v !== 2 || envelope.credentialHash !== (await credentialBindingHash(params.credentialId ?? ''))))
+    ) {
+        throw new Error('Key protection or credential does not match envelope')
+    }
 
     const wrappingKey = await crypto.subtle.importKey(
         'raw',
@@ -343,7 +414,7 @@ export async function unwrapPrimaryKey(params: {
     )
     const nonce = base64UrlToBytes(envelope.nonce)
     const ciphertext = base64UrlToBytes(envelope.ciphertext)
-    const aad = new TextEncoder().encode(`revaulter/v2/wrapped-primary-key\nuserId=${params.userId}\nv=1`)
+    const aad = await primaryKeyAAD(params.userId, mode, params.credentialId)
 
     try {
         const primaryKey = await crypto.subtle.decrypt(
@@ -755,4 +826,42 @@ function bytesToBase64(bytes: Uint8Array): string {
     }
 
     return btoa(binary)
+}
+
+async function primaryKeyAAD(userId: string, mode: 'prf' | 'bitwarden', credentialId?: string): Promise<Uint8Array> {
+    return new TextEncoder().encode(
+        mode === 'bitwarden'
+            ? `revaulter/v2/wrapped-primary-key\nuserId=${userId}\ncredentialHash=${await credentialBindingHash(credentialId ?? '')}\nmode=bitwarden\nv=2`
+            : `revaulter/v2/wrapped-primary-key\nuserId=${userId}\nv=1`
+    )
+}
+
+function validateArgon2id(cost: Argon2idCost) {
+    if (
+        !Number.isInteger(cost.m) ||
+        cost.m < 8 ||
+        cost.m > 262144 ||
+        !Number.isInteger(cost.t) ||
+        cost.t < 1 ||
+        cost.t > 10 ||
+        !Number.isInteger(cost.p) ||
+        cost.p < 1 ||
+        cost.p > 4 ||
+        cost.m < 8 * cost.p
+    ) {
+        throw new Error('Unsupported Argon2id cost')
+    }
+}
+
+export function generateUnlockSecret(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(32))
+    try {
+        return bytesToBase64Url(bytes)
+    } finally {
+        bytes.fill(0)
+    }
+}
+
+export async function credentialBindingHash(credentialId: string): Promise<string> {
+    return bytesToBase64Url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(credentialId)))
 }

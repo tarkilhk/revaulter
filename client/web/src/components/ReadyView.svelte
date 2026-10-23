@@ -15,12 +15,13 @@ import type {
 } from '$lib/v2-types'
 
 interface Props {
+    keyProtection: 'prf' | 'bitwarden'
     allowedIpsText: string
     credentials: V2CredentialItem[]
     displayName: string
     hasPassword: boolean
     listConnected: boolean
-    onAddPasskey: (name: string) => Promise<void>
+    onAddPasskey: (name: string, mode: 'prf' | 'bitwarden', secret: string) => Promise<void>
     onAllowedIpsTextInput: (value: string) => void
     onChangePassword: (password: string) => Promise<void>
     onDeletePasskey: (id: string) => Promise<void>
@@ -46,7 +47,7 @@ interface Props {
     onUpdateDisplayName: (name: string) => Promise<void>
     pageError: string | null
     pendingItems: V2PendingRequestItem[]
-    withApprovalKey: <T>(use: (key: Uint8Array) => Promise<T>) => Promise<T>
+    withApprovalKey: <T>(state: string, use: (key: Uint8Array, grant: string) => Promise<T>) => Promise<T>
     requestKey: string
     requestKeyEnabled: boolean
     requestOidcEnabled: boolean
@@ -62,6 +63,7 @@ interface Props {
 }
 
 let {
+    keyProtection,
     allowedIpsText,
     credentials,
     displayName,
@@ -247,6 +249,7 @@ function rejectAll() {
 
     {#if settingsModalOpen}
         <UserSettingsModal
+            {keyProtection}
             {userId}
             {displayName}
             {requestKey}

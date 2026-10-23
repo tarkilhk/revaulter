@@ -304,7 +304,7 @@ describe('wrapPrimaryKey / unwrapPrimaryKey', () => {
 
 describe('parseWrappedPrimaryKeyEnvelope', () => {
     it('rejects invalid version', () => {
-        const json = JSON.stringify({ v: 2, passwordRequired: false, nonce: 'aaa', ciphertext: 'bbb' })
+        const json = JSON.stringify({ v: 3, passwordRequired: false, nonce: 'aaa', ciphertext: 'bbb' })
         const encoded = bytesToBase64Url(new TextEncoder().encode(json))
         expect(() => parseWrappedPrimaryKeyEnvelope(encoded)).toThrow('Unsupported wrapped key version')
     })

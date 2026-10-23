@@ -45,6 +45,7 @@ type confirmPublicKey struct {
 }
 
 type confirmRequest struct {
+	ApprovalGrant    string                       `json:"approvalGrant"`
 	State            string                       `json:"state"`
 	Confirm          bool                         `json:"confirm,omitempty"`
 	Cancel           bool                         `json:"cancel,omitempty"`
@@ -230,6 +231,10 @@ func (s *Server) RouteV2APIConfirm(c *gin.Context) {
 	// Complete the request and write the audit row atomically
 	// Returns ErrRequestNotModifiable if the request can't be found, if it's not pending, or if it doesn't belong to the current user
 	rec, err := db.ExecuteInTransaction(c.Request.Context(), s.db, 30*time.Second, func(ctx context.Context, tx *db.DbTx) (*db.V2RequestRecord, error) {
+		_, grantErr := s.consumeApprovalGrant(c, tx, userID, req.ApprovalGrant, req.State, "", "")
+		if grantErr != nil {
+			return nil, grantErr
+		}
 		vRec, rErr := tx.RequestStore().CompleteRequest(ctx, req.State, userID, *req.ResponseEnvelope)
 		if rErr != nil {
 			return nil, rErr

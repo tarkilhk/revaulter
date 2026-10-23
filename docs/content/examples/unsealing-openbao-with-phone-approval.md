@@ -5,9 +5,9 @@ weight: 90
 
 This fork adds an example one-shot worker for an initialized OpenBao node using Shamir 2-of-3 shares. It reuses Revaulter's encrypted CLI/browser protocol. The worker does not introduce another cryptographic service or a new HTTP API.
 
-The fork's browser requires a fresh local WebAuthn ceremony with user verification and PRF output for each approval.
+The fork's browser requires a fresh server-verified WebAuthn ceremony with user verification for each approval. Each credential explicitly selects PRF protection or Bitwarden unlock-secret protection; a missing PRF result never changes modes.
 Between actions it retains only ciphertext wrappers, the public PRF salt and credential/RP metadata from the initial login.
-Every action uses a new random 32-byte challenge and the same credential/RP, checks session and credential validity before and after the ceremony, and unwraps keys only for that action.
+Every action uses a new server-generated challenge and the same credential/RP. The server checks the signature, origin, user-verification flag and live credential. Request approval grants expire after two minutes, bind the owner, credential, key epochs and immutable request, and are consumed in the same transaction as confirmation. Revocation, cancellation or rotation invalidates an outstanding grant. Keys are unwrapped only for that action.
 The existing server rate limits are unchanged; approvals do not re-download encrypted wrappers.
 After a legitimate password change the encrypted cache is refreshed, and a changed/revoked credential requires a new login. It strips PRF results from server-bound credentials and clears unlocked byte buffers when an action finishes or fails. Bulk confirmation is removed. An existing login session cannot supply an already-unlocked key to a request.
 
@@ -46,7 +46,7 @@ Revaulter, its database, TLS, DNS and network access must remain available while
 ## Enroll using dummy material first
 
 1. Choose a stable HTTPS approval origin. Changing the WebAuthn relying-party identity later is not a transparent migration.
-2. Register a PRF-capable passkey on the intended phone. Use an ordinary browser such as Chrome, rather than assuming an embedded HA WebView supports the same extensions. Verify the exact Android/browser/provider combination. A synced passkey may exist on other devices, and user verification may use the device PIN instead of biometrics.
+2. Explicitly choose PRF protection with a PRF-capable passkey, or Bitwarden protection with an ordinary Bitwarden passkey and the generated unlock secret described below. Use an ordinary browser such as Chrome, rather than assuming an embedded HA WebView supports the same extensions. Verify the exact Android/browser/provider combination. A synced passkey may exist on other devices, and user verification may use the device PIN instead of biometrics.
 3. On the trusted worker, run `revaulter-cli trust` interactively once, supplying the Revaulter URL, `--request-key-file` and `--trust-store` paths from the worker configuration. Verify its public anchor fingerprint against the phone UI over a trusted channel. Keep the trust store; unattended first-use trust is deliberately refused.
 4. On an operator-controlled enrollment device, run `python3 examples/openbao/enroll.py /absolute/path/to/enrollment.json` with the same target/key label and suitable local paths for the CLI, request key, trust store and encrypted output. It asks for two shares through masked terminal prompts, builds the target-bound bundle in memory and pipes it directly to the CLI. Start with dummy 33-byte base64 values against a disposable fixture.
 5. Approve encryption on the phone. The helper writes only the encrypted envelope, refuses to overwrite an existing output and never includes either share in arguments or diagnostics. Copy that ciphertext to the worker's configured envelope path. Do not put real plaintext on dev, CI or HA, or in files, command arguments, shell history, environment variables or a CI secret. The enrollment device needs the same memory/swap protections as the worker.
@@ -54,6 +54,20 @@ Revaulter, its database, TLS, DNS and network access must remain available while
 7. Only after the real phone's fresh-verification behavior, cancellation, wrong-password handling, worker TLS and recovery procedure are accepted should the operator repeat enrollment with real shares on the trusted device. This research/implementation task does not perform that operation.
 
 If this account or passkey was previously used with the unpatched client, assume its PRF wrapping factor may have been disclosed to its server. Do not assume upgrading recovers secrecy for previously wrapped primary keys. Use a new account/root key and re-enroll protected material; assess previously exposed shares separately. There is no automatic migration or fallback to the old unlocked-key behavior.
+
+## Bitwarden setup
+
+Select **Bitwarden passkey and unlock secret** during signup. Save the displayed, locally generated 256-bit unlock secret as the password in the same dedicated Bitwarden login item as this Revaulter passkey. It is not your Bitwarden master password, OpenBao shares or the CI request token. Confirm that you saved it before finishing signup. Revaulter sends neither this secret nor a password verifier to the server; only encrypted key wrappers leave the browser.
+
+Use an item-specific **Regular expression** URI match restricted to the approval HTTPS origin. For the homelab origin, the rule is `^https://revaulter\.hollinger\.asia(?:/.*)?$`. Remove unrelated URI entries from this dedicated item. Bitwarden's default **Base domain** matching covers sibling hosts, and **Host** also matches HTTP. Android URI matching has limitations, so physically verify that autofill is offered at the intended HTTPS origin and not at HTTP, a sibling host or a lookalike before real enrollment. See [Bitwarden URI matching](https://bitwarden.com/help/uri-match-detection/).
+
+For each request, verify the operation and origin, complete the fresh ordinary passkey ceremony, then autofill this Revaulter item password. Canceling either step leaves the request unapproved. The browser clears the input and unlocked byte buffers after success, cancellation or error. JavaScript strings cannot be reliably overwritten; this relies on the trusted browser and Bitwarden process, not a guarantee of forensic memory erasure. No unlocked primary key is retained between actions.
+
+This mode has a different trust boundary from PRF: possession of the unlock secret and encrypted wrapper is sufficient to recover the primary key offline. The secret is stored and synchronized by Bitwarden; the ordinary WebAuthn passkey authenticates approvals but does not cryptographically supply the wrapping key. Fresh user verification does not guarantee a fresh fingerprint prompt when the provider is already unlocked. Keep Bitwarden's own device and vault protections appropriate to this tradeoff.
+
+Existing PRF credentials keep their original encrypted material. Adding a credential explicitly selects its protection mode. To add Bitwarden to an existing PRF account, generate and save its unlock secret in the dedicated Bitwarden login item before registering the new credential. Verify both credentials can decrypt dummy data under the same anchor fingerprint before removing any credential. Never substitute a fixed PRF value or derive encryption keys from WebAuthn signatures.
+
+The phone unwraps Revaulter's primary key and processes the encrypted request. During an authorized unseal, the trusted worker still briefly receives the plaintext shares in RAM before submitting them to OpenBao. CI, HA and shared dev receive neither the unlock secret nor those shares.
 
 ## Invoke from CI without returning material
 

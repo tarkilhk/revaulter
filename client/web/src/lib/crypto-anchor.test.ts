@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
     type AttestationPayload,
@@ -296,5 +296,25 @@ describe('anchorFingerprint', () => {
         expect(fpA).not.toEqual(fpMixed1)
         expect(fpA).not.toEqual(fpMixed2)
         expect(fpMixed1).not.toEqual(fpMixed2)
+    })
+})
+
+describe('anchor plaintext lifetime', () => {
+    it('clears decrypted bytes when anchor parsing fails', async () => {
+        const blob = new Uint8Array(100).fill(42)
+        const decrypt = vi.spyOn(crypto.subtle, 'decrypt').mockResolvedValueOnce(blob.buffer)
+        const wrapped = bytesToBase64Url(
+            new TextEncoder().encode(
+                `ciphertext=${bytesToBase64Url(new Uint8Array(32))}\nnonce=${bytesToBase64Url(new Uint8Array(12))}\nv=1`
+            )
+        )
+        try {
+            await expect(
+                unwrapAnchorKey({ userId: 'dummy', wrappingKeyBytes: new Uint8Array(32), wrapped })
+            ).rejects.toThrow('invalid prefix')
+            expect(blob.every((value) => value === 0)).toBe(true)
+        } finally {
+            decrypt.mockRestore()
+        }
     })
 })
