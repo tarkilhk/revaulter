@@ -53,9 +53,6 @@ test('passwordless login never transmits PRF output', async ({ page }) => {
     try {
         await skipPasswordSetup(page)
         await openSignInState(page)
-        await expect(
-            page.getByText('Session exists but local key material is missing. Sign in again to continue.')
-        ).toBeVisible()
 
         const loginRequest = page.waitForRequest((request) => {
             return request.url().includes('/v2/auth/login/finish') && request.method() === 'POST'
@@ -124,7 +121,7 @@ test('registration explains when the authenticator does not support PRF', async 
     }
 })
 
-test('user can register and later return to sign-in after password setup', async ({ page }) => {
+test('user can register and explicitly sign out after password setup', async ({ page }) => {
     const passkey = await registerThroughUI(page, 'Password User')
 
     try {
@@ -201,6 +198,6 @@ test('reload during non-ready setup resumes via session endpoint', async ({ page
 })
 
 async function openSignInState(page) {
-    await page.goto('/')
+    await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page.getByRole('heading', { name: 'Sign in to Revaulter' })).toBeVisible()
 }

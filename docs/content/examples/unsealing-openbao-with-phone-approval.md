@@ -9,6 +9,8 @@ The fork's browser requires a fresh server-verified WebAuthn ceremony with user 
 Between actions it retains only ciphertext wrappers, the public PRF salt and credential/RP metadata from the initial login.
 Every action uses a new server-generated challenge and the same credential/RP. The server checks the signature, origin, user-verification flag and live credential. Request approval grants expire after two minutes, bind the owner, credential, key epochs and immutable request, and are consumed in the same transaction as confirmation. Revocation, cancellation or rotation invalidates an outstanding grant. Keys are unwrapped only for that action.
 The existing server rate limits are unchanged; approvals do not re-download encrypted wrappers.
+The browser saves only encrypted key wrappers and public credential metadata in same-origin local storage so reloads and notification tabs can resume a live session. It checks the current server identity, credential protection and key epoch before restoring the dashboard; every approval still requires fresh verification and local unlocking. Signing out removes the saved wrappers.
+
 After a legitimate password change the encrypted cache is refreshed, and a changed/revoked credential requires a new login. It strips PRF results from server-bound credentials and clears unlocked byte buffers when an action finishes or fails. Bulk confirmation is removed. An existing login session cannot supply an already-unlocked key to a request.
 
 These changes have automated dummy-material tests. A physical Android phone, its passkey provider, OpenBao 2.7.1 and the production network still require operator validation before real unseal material is enrolled. No production deployment is implied by this example.

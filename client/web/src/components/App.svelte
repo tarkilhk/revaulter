@@ -76,6 +76,7 @@ import type {
     V2SessionResponse,
 } from '$lib/v2-types'
 import { PrfUnavailableError, webauthnLoginWithPrf, webauthnRegister } from '$lib/webauthn'
+import { loadWrappedKey, saveWrappedKey } from '$lib/wrapped-key-storage'
 
 type UIState = 'boot' | 'signin' | 'signup' | 'password-login' | 'password-setup' | 'ready'
 
@@ -149,16 +150,41 @@ async function initialize() {
             return
         }
 
-        await v2Session()
-
-        // While sessions could survive page reloads, but the PRF secret is intentionally kept in memory only
-        // We remove the session state too
+        const active = await v2Session()
+        const cache = loadWrappedKey()
+        if (active.authenticated && cache?.userId === active.userId) {
+            const credentials = await v2ListCredentials()
+            const credential = credentials.find((item) => item.credentialId === cache.credentialId)
+            if (
+                credential &&
+                credential.keyProtection === cache.keyProtection &&
+                credential.wrappedKeyEpoch === cache.wrappedKeyEpoch &&
+                !credential.wrappedKeyStale
+            ) {
+                let envelope: ReturnType<typeof parseWrappedPrimaryKeyEnvelope>
+                try {
+                    envelope = parseWrappedPrimaryKeyEnvelope(cache.wrappedPrimaryKey!)
+                } catch (err) {
+                    clearLocalAuthState()
+                    throw err
+                }
+                session = active
+                wrappedKeyCache = cache
+                keyProtection = cache.keyProtection
+                sessionCredentialId = cache.credentialId
+                sessionCredentialWrappedKeyEpoch = cache.wrappedKeyEpoch
+                hasPassword = envelope.passwordRequired
+                enterReadyView()
+                return
+            }
+        }
         clearLocalAuthState()
-        authError = 'Session exists but local key material is missing. Sign in again to continue.'
+        authError = 'Sign in to refresh the encrypted keys saved in this browser.'
         uiState = 'signin'
     } catch (err) {
         if (err instanceof ResponseNotOkError) {
             if (err.statusCode === 401) {
+                clearLocalAuthState()
                 uiState = 'signin'
                 return
             }
@@ -295,6 +321,7 @@ function clearLocalAuthState() {
     void teardownListStream()
     session = null
     wrappedKeyCache = null
+    saveWrappedKey(null)
     prfSecret = null
     primaryKey = null
     sessionAnchor = null
@@ -313,6 +340,7 @@ function clearLocalAuthState() {
 
 function enterReadyView() {
     clearUnlockedKeys()
+    saveWrappedKey(wrappedKeyCache)
     uiState = 'ready'
     passwordInput = ''
     authError = null
@@ -1321,6 +1349,7 @@ async function doChangePasswordUnlocked(password: string, grant: string) {
             wrappedAnchorKey: wrappedAnchor,
             wrappedKeyEpoch: session.wrappedKeyEpoch,
         }
+        saveWrappedKey(wrappedKeyCache)
         sessionCredentialWrappedKeyEpoch = session.wrappedKeyEpoch
         await doLoadCredentials()
         hasPassword = !!password
