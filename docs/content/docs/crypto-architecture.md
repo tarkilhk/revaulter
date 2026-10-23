@@ -73,6 +73,10 @@ Despite all possible mitigations, there is still a residual risk inherent with t
 ## Primary key lifecycle
 
 The `primaryKey` is the root secret for a user account.
+This fork requires a fresh local WebAuthn ceremony with user verification and PRF for every approval; a login session caches only encrypted key wrappers and public credential metadata, never an unlocked primary key.
+Each action uses a random 32-byte challenge, a fixed credential and RP, and session/credential checks before and after user verification.
+Only the public PRF capability bit may be serialized into credentials sent to the server, never PRF results.
+JavaScript and WebCrypto do not provide guaranteed physical memory erasure.
 It is generated once in the browser during setup and reused across passkeys by re-wrapping it for each credential.
 
 Properties:
@@ -80,7 +84,7 @@ Properties:
 - Size: 32 bytes
 - Generation: browser-side random generation through WebCrypto
 - Storage: only as a wrapped blob on the server
-- Exposure: kept in-memory in the browser after successful login or password unlock
+- Exposure: unwrapped only for the current action, then mutable secret buffers are overwritten and references released
 
 ```mermaid
 sequenceDiagram

@@ -61,6 +61,7 @@ func (s *Server) initWebAuthn() (*webauthnlib.WebAuthn, error) {
 		RPID:                              rpID,
 		RPDisplayName:                     cfg.WebAuthnRPName,
 		RPOrigins:                         filtered,
+		AuthenticatorSelection:            protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired},
 		ExtensionsUnsolicitedOutputPolicy: protocol.UnsolicitedOutputPolicyIgnore,
 	}
 

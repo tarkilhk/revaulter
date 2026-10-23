@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 
 import {
     addPasskeyThroughSettings,
+    answerFreshPassword,
     createPasskeyManager,
     readSession,
     registerWithManager,
@@ -23,7 +24,7 @@ test.beforeEach(async ({ page, request }) => {
 
 // Helper that drives a full CLI encrypt/decrypt round-trip through the UI
 // The caller is expected to already be on the ready view when each half is invoked
-async function runEncryptThroughUI(page, requestKey, plaintext, noteSuffix) {
+async function runEncryptThroughUI(page, requestKey, plaintext, noteSuffix, password) {
     await waitForListStream(page)
     const encryptRun = startCLIRequest({
         operation: 'encrypt',
@@ -35,7 +36,10 @@ async function runEncryptThroughUI(page, requestKey, plaintext, noteSuffix) {
     })
 
     await expect(page.getByText(`multi-passkey encrypt ${noteSuffix}`)).toBeVisible()
-    await page.getByRole('button', { name: 'Confirm' }).click()
+    await page.getByRole('button', { name: 'Verify and confirm' }).click()
+    if (password) {
+        await answerFreshPassword(page, password)
+    }
 
     const result = await encryptRun.done
     expect(result.json.kind).toBe('revaulter/1')
@@ -44,7 +48,7 @@ async function runEncryptThroughUI(page, requestKey, plaintext, noteSuffix) {
     return result.json
 }
 
-async function runDecryptThroughUI(page, requestKey, encryptOutput, noteSuffix) {
+async function runDecryptThroughUI(page, requestKey, encryptOutput, noteSuffix, password) {
     await waitForListStream(page)
     const decryptRun = startCLIRequest({
         operation: 'decrypt',
@@ -59,7 +63,10 @@ async function runDecryptThroughUI(page, requestKey, encryptOutput, noteSuffix) 
     })
 
     await expect(page.getByText(`multi-passkey decrypt ${noteSuffix}`)).toBeVisible()
-    await page.getByRole('button', { name: 'Confirm' }).click()
+    await page.getByRole('button', { name: 'Verify and confirm' }).click()
+    if (password) {
+        await answerFreshPassword(page, password)
+    }
 
     const result = await decryptRun.done
     expect(result.json.operation).toBe('decrypt')
@@ -80,7 +87,7 @@ test('two passkeys without a password can each sign in and share the primary key
         // The helper expects the manager to already have the desired authenticator active
         const secondId = await manager.addAuthenticator({ active: false })
         await manager.setActive(secondId)
-        await addPasskeyThroughSettings(page, manager, 'Second Passkey')
+        await addPasskeyThroughSettings(page, manager, 'Second Passkey', { verifyWith: firstId, enrollWith: secondId })
 
         // Sign out and sign back in with the first passkey, then encrypt a message via the CLI
         await signOutThroughUI(page)
@@ -117,10 +124,14 @@ test('two passkeys with a password set before the second passkey share the prima
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
 
         // Add the second passkey
-        // DoAddPasskey reuses the in-memory session password to wrap the new credential's primary key
+        // Adding a passkey requires fresh verification and the current password
         const secondId = await manager.addAuthenticator({ active: false })
         await manager.setActive(secondId)
-        await addPasskeyThroughSettings(page, manager, 'Second Passkey')
+        await addPasskeyThroughSettings(page, manager, 'Second Passkey', {
+            verifyWith: firstId,
+            enrollWith: secondId,
+            password,
+        })
 
         // Sign out and sign back in with the first passkey, unlocking with the password before encrypting
         await signOutThroughUI(page)
@@ -129,7 +140,7 @@ test('two passkeys with a password set before the second passkey share the prima
         await unlockWithPassword(page, password)
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
         const firstSession = await readSession(page)
-        const encrypted = await runEncryptThroughUI(page, firstSession.requestKey, 'hello world', 'pk1')
+        const encrypted = await runEncryptThroughUI(page, firstSession.requestKey, 'hello world', 'pk1', password)
 
         // Sign in with the second passkey using the same password
         // Both credentials must unwrap to the same primary key
@@ -140,7 +151,7 @@ test('two passkeys with a password set before the second passkey share the prima
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
         const secondSession = await readSession(page)
         expect(secondSession.userId).toBe(firstSession.userId)
-        const decrypted = await runDecryptThroughUI(page, secondSession.requestKey, encrypted, 'pk2')
+        const decrypted = await runDecryptThroughUI(page, secondSession.requestKey, encrypted, 'pk2', password)
         expect(decrypted.decodedValue).toBe('hello world')
     } finally {
         await manager.dispose()
@@ -164,7 +175,11 @@ test('changing the password on one passkey leaves the other on the old password 
         // Add a second passkey while the first password is still active so both passkeys initially use the same password
         const secondId = await manager.addAuthenticator({ active: false })
         await manager.setActive(secondId)
-        await addPasskeyThroughSettings(page, manager, 'Second Passkey')
+        await addPasskeyThroughSettings(page, manager, 'Second Passkey', {
+            verifyWith: firstId,
+            enrollWith: secondId,
+            password: oldPassword,
+        })
 
         // Change the password while signed in with the first passkey
         // This should only update this credential immediately
@@ -175,7 +190,7 @@ test('changing the password on one passkey leaves the other on the old password 
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
 
         const newPassword = 'hunter3'
-        await setPasswordThroughSettings(page, newPassword)
+        await setPasswordThroughSettings(page, newPassword, oldPassword)
 
         // The second passkey should still be on the old password until it logs in and refreshes its wrapper
         await signOutThroughUI(page)
@@ -191,7 +206,13 @@ test('changing the password on one passkey leaves the other on the old password 
         await unlockWithPassword(page, oldPassword)
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
         const secondSession = await readSession(page)
-        const encrypted = await runEncryptThroughUI(page, secondSession.requestKey, 'hello world', 'pk2-old-password')
+        const encrypted = await runEncryptThroughUI(
+            page,
+            secondSession.requestKey,
+            'hello world',
+            'pk2-old-password',
+            oldPassword
+        )
 
         // The first passkey should also have moved to the new password because it was the one used to initiate the change
         await signOutThroughUI(page)
@@ -201,7 +222,13 @@ test('changing the password on one passkey leaves the other on the old password 
         await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
         const firstSession = await readSession(page)
         expect(firstSession.userId).toBe(secondSession.userId)
-        const decrypted = await runDecryptThroughUI(page, firstSession.requestKey, encrypted, 'pk1-new-password')
+        const decrypted = await runDecryptThroughUI(
+            page,
+            firstSession.requestKey,
+            encrypted,
+            'pk1-new-password',
+            newPassword
+        )
         expect(decrypted.decodedValue).toBe('hello world')
     } finally {
         await manager.dispose()

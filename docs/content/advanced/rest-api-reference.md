@@ -735,6 +735,9 @@ Update the wrapped primary key for a specific credential. Used after a password 
 
 #### `GET /v2/auth/credentials`
 
+Each entry includes its database row `id` (used for rename/delete) and public WebAuthn `credentialId` (used to check the selected passkey and wrapped-key epoch). Neither field is key material.
+
+
 List all WebAuthn credentials for the authenticated user.
 
 **Response:** `200 OK`

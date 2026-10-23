@@ -1,4 +1,3 @@
-import { runInNewContext } from 'node:vm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -116,6 +115,12 @@ function buildFixtureAttestationObject(fixture: (typeof COSE_FIXTURES)[number]):
     return Uint8Array.from(attestationObject).buffer
 }
 
+function verifiedAuthenticatorData(): ArrayBuffer {
+    const data = new Uint8Array(37)
+    data[32] = 0x05
+    return data.buffer
+}
+
 function assertionCredential(
     extensionResults: unknown = { prf: { enabled: true, results: { first: bytes(9, 8, 7) } } }
 ) {
@@ -124,7 +129,7 @@ function assertionCredential(
         rawId: bytes(1, 2, 3),
         type: 'public-key',
         response: new FakeAuthenticatorAssertionResponse({
-            authenticatorData: bytes(4, 5),
+            authenticatorData: verifiedAuthenticatorData(),
             clientDataJSON: bytes(6, 7),
             signature: bytes(8, 9),
             userHandle: bytes(10),
@@ -196,7 +201,7 @@ describe('serializePublicKeyCredential', () => {
             id: 'credential',
             rawId: 'Y3JlZGVudGlhbA',
             type: 'public-key',
-            clientExtensionResults: { prf: { results: { first: '-_8A' } } },
+            clientExtensionResults: {},
         })
     })
 
@@ -228,9 +233,9 @@ describe('serializePublicKeyCredential', () => {
             id: 'assertion-id',
             rawId: 'AQID',
             type: 'public-key',
-            clientExtensionResults: { prf: { enabled: true, results: { first: 'CQgH' } } },
+            clientExtensionResults: { prf: { enabled: true } },
             response: {
-                authenticatorData: 'BAU',
+                authenticatorData: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAF AAAAAA'.replace(' ', ''),
                 clientDataJSON: 'Bgc',
                 signature: 'CAk',
                 userHandle: 'Cg',
@@ -262,56 +267,18 @@ describe('serializePublicKeyCredential', () => {
 })
 
 describe('serializeWebAuthnExtensionResults', () => {
-    it('encodes nested PRF ArrayBuffer outputs as base64url', () => {
-        expect(
-            serializeWebAuthnExtensionResults({
-                prf: {
-                    enabled: true,
-                    results: { first: bytes(0xfb, 0xff, 0x00), second: bytes(1, 2, 3) },
-                },
-            })
-        ).toEqual({
-            prf: {
-                enabled: true,
-                results: { first: '-_8A', second: 'AQID' },
-            },
+    it.each([
+        { prf: { results: { first: bytes(1, 2), second: [3, 4] } } },
+        { prf: { results: { first: 'secret' } }, future: { secret: bytes(1) } },
+        { 'hmac-secret': bytes(9), largeBlob: { blob: bytes(8) } },
+    ])('drops secret and unknown extension data', (input) => {
+        expect(serializeWebAuthnExtensionResults(input)).toEqual({})
+    })
+
+    it('keeps only the public PRF capability', () => {
+        expect(serializeWebAuthnExtensionResults({ prf: { enabled: true, results: { first: bytes(1) } } })).toEqual({
+            prf: { enabled: true },
         })
-    })
-
-    it('encodes an ArrayBuffer created in another realm', () => {
-        const foreignBuffer = runInNewContext('Uint8Array.from([251, 255, 0]).buffer')
-
-        expect(serializeWebAuthnExtensionResults({ future: { value: foreignBuffer } })).toEqual({
-            future: { value: '-_8A' },
-        })
-    })
-
-    it('encodes typed array and DataView ranges without unrelated backing-buffer bytes', () => {
-        const source = new Uint8Array([0x00, 0xfb, 0xff, 0x00, 0x00])
-
-        expect(
-            serializeWebAuthnExtensionResults({
-                typed: source.subarray(1, 4),
-                view: new DataView(source.buffer, 1, 3),
-            })
-        ).toEqual({ typed: '-_8A', view: '-_8A' })
-    })
-
-    it('encodes only valid byte arrays at PRF result paths', () => {
-        const invalid = [0, 256, 1.5, '2']
-        expect(
-            serializeWebAuthnExtensionResults({
-                prf: { results: { first: [251, 255, 0], second: invalid } },
-                uvm: [[1, 2, 3]],
-            })
-        ).toEqual({
-            prf: { results: { first: '-_8A', second: invalid } },
-            uvm: [[1, 2, 3]],
-        })
-    })
-
-    it.each([null, undefined, true, 42, 'value'])('preserves the primitive value %j', (value) => {
-        expect(serializeWebAuthnExtensionResults(value)).toBe(value)
     })
 })
 
@@ -454,7 +421,7 @@ describe('webauthnLoginWithPrf', () => {
 
         expect(get.mock.calls[0][0].publicKey).toMatchObject({
             timeout: 60_000,
-            userVerification: 'preferred',
+            userVerification: 'required',
         })
     })
 
@@ -478,15 +445,15 @@ describe('webauthnLoginWithPrf', () => {
         expect(result.raw).toMatchObject({
             credential: {
                 id: 'assertion-id',
-                clientExtensionResults: { prf: { enabled: true, results: { first: 'CQgH' } } },
+                clientExtensionResults: { prf: { enabled: true } },
                 response: {
-                    authenticatorData: 'BAU',
+                    authenticatorData: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAF AAAAAA'.replace(' ', ''),
                     clientDataJSON: 'Bgc',
                     signature: 'CAk',
                     userHandle: 'Cg',
                 },
             },
-            authenticatorData: 'BAU',
+            authenticatorData: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAF AAAAAA'.replace(' ', ''),
             clientDataJSON: 'Bgc',
             signature: 'CAk',
             userHandle: 'Cg',

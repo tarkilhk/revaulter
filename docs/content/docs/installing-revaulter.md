@@ -3,6 +3,8 @@ title: "Installing Revaulter"
 weight: 25
 ---
 
+For this fork's phone-approved OpenBao workflow, build the server, web client and CLI from the fork as described in its README. Published upstream images do not include these changes. Follow the [OpenBao example](/examples/unsealing-openbao-with-phone-approval/) for the trust boundary and enrollment procedure.
+
 Revaulter is distributed as a container image and runs as a single-container service.
 
 ## Requirements

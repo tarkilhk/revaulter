@@ -326,12 +326,21 @@ export async function signOutThroughUI(page) {
 
 // Adds a new passkey through the settings Passkeys tab using whichever authenticator is currently active on the manager
 // The add-passkey flow performs two WebAuthn ceremonies (create + PRF get), both of which rely on the active authenticator
-export async function addPasskeyThroughSettings(page, manager, name) {
+export async function addPasskeyThroughSettings(page, manager, name, { verifyWith, enrollWith, password } = {}) {
+    await manager.setActive(verifyWith)
+    await page.route('**/v2/auth/credentials/add/begin', async (route) => {
+        await manager.setActive(enrollWith)
+        await route.continue()
+    })
     await openSettingsTab(page, 'Passkeys')
     await page.getByRole('button', { name: 'Add passkey' }).click()
     await page.getByLabel('Passkey name (optional)').fill(name)
     await page.getByRole('button', { name: 'Register passkey' }).click()
+    if (password) {
+        await answerFreshPassword(page, password)
+    }
     await expect(page.getByText('Passkey added.')).toBeVisible({ timeout: 15_000 })
+    await page.unroute('**/v2/auth/credentials/add/begin')
     // Close the settings modal so the ready view is interactable again
     await page.getByRole('button', { name: 'Close settings' }).click()
     // Touch the manager reference so the linter is aware the caller must have set the active authenticator beforehand
@@ -339,7 +348,7 @@ export async function addPasskeyThroughSettings(page, manager, name) {
 }
 
 // Sets a password from the Settings → Password tab (used when the account was created without a password)
-export async function setPasswordThroughSettings(page, password) {
+export async function setPasswordThroughSettings(page, password, currentPassword) {
     await openSettingsTab(page, 'Password')
 
     const setPasswordInput = page.locator('input[placeholder="Enter password"]')
@@ -364,7 +373,14 @@ export async function setPasswordThroughSettings(page, password) {
             page.waitForResponse((response) => {
                 return response.url().includes('/v2/auth/update-wrapped-key') && response.request().method() === 'POST'
             }),
-            page.getByRole('button', { name: 'Change password' }).click(),
+            page
+                .getByRole('button', { name: 'Change password' })
+                .click()
+                .then(async () => {
+                    if (currentPassword) {
+                        await answerFreshPassword(page, currentPassword)
+                    }
+                }),
         ])
         if (!response.ok()) {
             throw new Error(`Password update failed: ${response.status()} ${await response.text()}`)
@@ -373,6 +389,14 @@ export async function setPasswordThroughSettings(page, password) {
 
     await expect(page.getByRole('button', { name: 'Close settings' })).toBeVisible()
     await page.getByRole('button', { name: 'Close settings' }).click()
+}
+
+export async function answerFreshPassword(page, password) {
+    const dialog = page.getByRole('dialog', { name: 'Unlock this action' })
+    await expect(dialog).toBeVisible()
+    await dialog.getByLabel('Passkey password').fill(password)
+    await dialog.getByRole('button', { name: 'Continue', exact: true }).click()
+    await expect(dialog).toBeHidden()
 }
 
 export function startCLIRequest(args) {

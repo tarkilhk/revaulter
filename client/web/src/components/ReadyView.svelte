@@ -46,7 +46,7 @@ interface Props {
     onUpdateDisplayName: (name: string) => Promise<void>
     pageError: string | null
     pendingItems: V2PendingRequestItem[]
-    primaryKey: Uint8Array | null
+    withApprovalKey: <T>(use: (key: Uint8Array) => Promise<T>) => Promise<T>
     requestKey: string
     requestKeyEnabled: boolean
     requestOidcEnabled: boolean
@@ -87,7 +87,7 @@ let {
     onUpdateDisplayName,
     pageError,
     pendingItems,
-    primaryKey,
+    withApprovalKey,
     requestKey,
     requestKeyEnabled,
     requestOidcEnabled,
@@ -122,11 +122,6 @@ function toggleSettingsModal() {
 function closeSettingsModal() {
     settingsModalOpen = false
     settingsButton?.focus()
-}
-
-function approveAll() {
-    bulkActionId += 1
-    bulkAction = { id: bulkActionId, action: 'confirm' }
 }
 
 function rejectAll() {
@@ -229,10 +224,6 @@ function rejectAll() {
                         {pendingItems.length} pending approvals
                     </div>
                     <div class="flex items-center gap-2">
-                        <Button variant="primary" size="sm" onclick={approveAll}>
-                            <Icon icon="check" title="" size="3.5" />
-                            Confirm all
-                        </Button>
                         <Button variant="ghost" size="sm" onclick={rejectAll}>
                             <Icon icon="x" title="" size="3.5" />
                             Decline all
@@ -241,17 +232,15 @@ function rejectAll() {
                 </div>
             {/if}
             {#each pendingItems as item, idx (item.state)}
-                {#if primaryKey}
                     <div class={idx === 0 ? '' : 'border-t border-neutral-200 dark:border-neutral-800'}>
                         <PendingItem
                             {bulkAction}
                             {item}
                             {now}
-                            {primaryKey}
+                            {withApprovalKey}
                             onRemoved={onRemoveItem}
                         />
                     </div>
-                {/if}
             {/each}
         </div>
     {/if}

@@ -197,6 +197,7 @@ export type V2SessionResponse = {
 }
 
 export type V2CredentialItem = {
+    credentialId: string
     id: string
     displayName: string
     wrappedKeyEpoch: number

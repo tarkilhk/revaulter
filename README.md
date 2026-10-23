@@ -4,6 +4,8 @@
 
 # Revaulter: Encrypt, decrypt, and sign with passkeys
 
+This fork adds fresh passkey verification for each approval, keeps PRF results client-only, and includes a [trusted-worker OpenBao example](docs/content/examples/unsealing-openbao-with-phone-approval.md). Changes require operator review and real-device validation before use with live unseal shares.
+
 **[📚 Read the docs](https://revaulter.italypaleale.me)**
 
 Encryption keys and signing keys don't belong in environment variables or on disk. Revaulter keeps them in your passkey: scripts submit a request with the CLI, you approve it in your browser with a passkey, and the browser performs the crypto locally. Everything is End-to-End Encrypted (E2EE) between the CLI and your browser.
@@ -32,13 +34,23 @@ Encryption keys and signing keys don't belong in environment variables or on dis
 
 ## Quick start
 
-Run Revaulter with Docker:
+Build this fork first. Published upstream binaries and container images do not include these changes. Use Go 1.27.3+, Node 24 and the pinned pnpm version from `client/web/package.json`:
+
+```sh
+(cd client/web && pnpm install --frozen-lockfile && pnpm build)
+mkdir -p .bin/linux-amd64
+CGO_ENABLED=0 GOARCH=amd64 go build -trimpath -o .bin/linux-amd64/revaulter ./cmd/revaulter
+CGO_ENABLED=0 GOARCH=amd64 go build -trimpath -o .bin/linux-amd64/revaulter-cli ./cmd/cli
+docker build -t revaulter-phone-approval:local .
+```
+
+The example above targets Linux amd64. Run the locally built image with Docker:
 
 ```yaml
 # docker-compose.yml
 services:
   revaulter:
-    image: ghcr.io/italypaleale/revaulter:2
+    image: revaulter-phone-approval:local
     ports:
       - "8080:8080"
     volumes:
@@ -60,7 +72,7 @@ Then start the server, open the web UI, and create your first account.
 
 ## Documentation
 
-All documentation lives on the [website](https://revaulter.italypaleale.me).
+The [upstream website](https://revaulter.italypaleale.me) documents the base project. Fork-specific approval and OpenBao instructions live in the [local example](docs/content/examples/unsealing-openbao-with-phone-approval.md).
 
 Quick links:
 

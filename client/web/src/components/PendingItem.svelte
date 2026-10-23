@@ -34,11 +34,11 @@ interface Props {
     bulkAction?: { id: number; action: 'confirm' | 'cancel' } | null
     item: V2PendingRequestItem
     now: number
-    primaryKey: Uint8Array
+    withApprovalKey: <T>(use: (key: Uint8Array) => Promise<T>) => Promise<T>
     onRemoved?: (state: string) => void
 }
 
-let { bulkAction = null, item, now, primaryKey, onRemoved }: Props = $props()
+let { bulkAction = null, item, now, withApprovalKey, onRemoved }: Props = $props()
 
 let working = $state(false)
 let localStatus = $state<string>('pending')
@@ -98,9 +98,11 @@ async function doConfirm() {
     working = true
     localStatus = '_processing'
     try {
-        const req = await ensureDetail()
-        const { envelope, publicKey } = await buildResponseEnvelope(req)
-        const res = await v2Confirm(item.state, envelope, publicKey)
+        const res = await withApprovalKey(async (primaryKey) => {
+            const req = await ensureDetail()
+            const { envelope, publicKey } = await buildResponseEnvelope(req, primaryKey)
+            return await v2Confirm(item.state, envelope, publicKey)
+        })
         if (!res?.confirmed) {
             throw new Error('Confirm failed')
         }
@@ -138,7 +140,8 @@ $effect(() => {
 })
 
 async function buildResponseEnvelope(
-    req: V2RequestDetail
+    req: V2RequestDetail,
+    primaryKey: Uint8Array
 ): Promise<{ envelope: V2ResponseEnvelope; publicKey?: { jwk: V2SigningJwk; pem: string } }> {
     // Validate the algorithm against what the operation supports
     switch (req.operation) {
@@ -454,7 +457,7 @@ $effect(() => {
             </div>
 
             {#if error}
-                <div class="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-900/70 dark:bg-rose-950/40 dark:text-rose-200">
+                <div role="alert" class="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-900/70 dark:bg-rose-950/40 dark:text-rose-200">
                     {error}
                 </div>
             {/if}
@@ -477,13 +480,14 @@ $effect(() => {
                     variant="primary"
                     size="sm"
                     disabled={working || (localStatus !== 'pending' && localStatus !== '_failed')}
+                    ariaLabel={localStatus === '_failed' ? 'Retry verification' : 'Verify and confirm'}
                     onclick={doConfirm}
                 >
                     {#if working && localStatus === '_processing'}
                         <LoadingSpinner size="0.85rem" />
                     {:else}
                         <Icon icon="check" title="" size="3.5" />
-                        {localStatus === '_failed' ? 'Retry' : 'Confirm'}
+                        {localStatus === '_failed' ? 'Retry verification' : 'Verify and confirm'}
                     {/if}
                 </Button>
                 <Button

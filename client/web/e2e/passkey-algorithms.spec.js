@@ -85,7 +85,7 @@ for (const algorithmName of ALGORITHMS) {
                 await page.getByRole('button', { name: 'Continue with passkey' }).click()
 
                 const body = (await loginRequest).postDataJSON()
-                expect(typeof body.credential.clientExtensionResults.prf.results.first).toBe('string')
+                expect(body.credential.clientExtensionResults).toEqual({ prf: { enabled: true } })
                 await expect(page.getByRole('heading', { name: 'Pending approvals' })).toBeVisible()
             } finally {
                 await passkey.dispose()
@@ -112,7 +112,7 @@ for (const algorithmName of ALGORITHMS) {
 
                 // The CLI is compiled on first use, which can take longer than the default expect timeout
                 await expect(page.getByText(`approval with ${algorithm.name}`)).toBeVisible({ timeout: 60_000 })
-                await page.getByRole('button', { name: 'Confirm' }).click()
+                await page.getByRole('button', { name: 'Verify and confirm' }).click()
 
                 const encryptResult = await encryptRun.done
                 expect(encryptResult.json.kind).toBe('revaulter/1')
