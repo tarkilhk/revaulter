@@ -4,6 +4,7 @@ import Icon from '$components/Icon.svelte'
 import Logo from '$components/Logo.svelte'
 import PendingItem from '$components/PendingItem.svelte'
 import UserSettingsModal from '$components/UserSettingsModal.svelte'
+import type { EnrollOpenBao } from '$lib/openbao-enrollment'
 
 import type {
     DerivedSigningKey,
@@ -26,6 +27,7 @@ interface Props {
     onChangePassword: (password: string) => Promise<void>
     onDeletePasskey: (id: string) => Promise<void>
     onDeleteSigningKey: (id: string) => Promise<void>
+    onEnrollOpenBao: EnrollOpenBao
     onDeriveSigningKey: (keyLabel: string, algorithm: string) => Promise<DerivedSigningKey>
     onLogout: () => Promise<void>
     onPublishSigningKey: (derived: DerivedSigningKey) => Promise<void>
@@ -78,6 +80,7 @@ let {
     onChangePassword,
     onDeletePasskey,
     onDeleteSigningKey,
+    onEnrollOpenBao,
     onDeriveSigningKey,
     onLogout,
     onPublishSigningKey,
@@ -290,6 +293,7 @@ function rejectAll() {
             {onAddPasskey}
             {onRenamePasskey}
             {onDeletePasskey}
+            {onEnrollOpenBao}
             {onDeriveSigningKey}
             {onPublishSigningKey}
             {onUnpublishSigningKey}

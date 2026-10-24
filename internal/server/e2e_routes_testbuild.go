@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"uuid"
@@ -120,6 +121,8 @@ func AddE2ETestRoutes(token string) func(s *Server, r gin.IRouter) {
 		group.POST("/seed-session", s.RouteE2ESeedSession)
 		group.POST("/seed-request", s.RouteE2ESeedRequest)
 		group.POST("/seed-credential", s.RouteE2ESeedCredential)
+		group.POST("/openbao-enrollment", s.RouteE2EConfigureOpenBaoEnrollment)
+		group.GET("/openbao-enrollment", s.RouteE2EReadOpenBaoEnrollment)
 		group.GET("/request/:state", s.RouteE2EGetRequest)
 		group.GET("/request/:state/result", s.RouteE2EGetRequestResult)
 	}
@@ -138,6 +141,7 @@ func init() {
 
 // RouteE2EReset is the handler for POST /__e2e__/reset
 func (s *Server) RouteE2EReset(c *gin.Context) {
+	resetE2EOpenBaoEnrollment()
 	// Reset the database
 	err := s.db.ResetAllForTests(c.Request.Context())
 	if err != nil {
@@ -152,6 +156,61 @@ func (s *Server) RouteE2EReset(c *gin.Context) {
 	c.JSON(http.StatusOK, e2eOKResponse{
 		OK: true,
 	})
+}
+
+// Only this e2e-tagged fixture may configure and read synthetic enrollment state
+var e2eOpenBaoDirectory string
+var e2eOpenBaoBaseURL string
+
+func resetE2EOpenBaoEnrollment() {
+	if e2eOpenBaoDirectory != "" {
+		_ = os.RemoveAll(e2eOpenBaoDirectory)
+		e2eOpenBaoDirectory = ""
+	}
+	config.Get().OpenBaoEnrollmentPath = ""
+	config.Get().OpenBaoURL = ""
+	if e2eOpenBaoBaseURL != "" {
+		config.Get().BaseUrl = e2eOpenBaoBaseURL
+		e2eOpenBaoBaseURL = ""
+	}
+}
+
+func (s *Server) RouteE2EConfigureOpenBaoEnrollment(c *gin.Context) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		AbortWithErrorJSON(c, NewResponseError(http.StatusBadRequest, "Invalid fixture configuration"))
+		return
+	}
+	resetE2EOpenBaoEnrollment()
+	if req.Enabled {
+		e2eOpenBaoDirectory, err = os.MkdirTemp("", "revaulter-e2e-openbao-")
+		if err != nil {
+			AbortWithErrorJSON(c, err)
+			return
+		}
+		config.Get().OpenBaoEnrollmentPath = filepath.Join(e2eOpenBaoDirectory, "openbao.json")
+		config.Get().OpenBaoURL = "https://bao.example"
+		// The fixture represents an HTTPS deployment while Playwright uses local HTTP transport
+		e2eOpenBaoBaseURL = config.Get().BaseUrl
+		config.Get().BaseUrl = "https://revaulter.example"
+	}
+	c.JSON(http.StatusOK, e2eOKResponse{OK: true})
+}
+
+func (s *Server) RouteE2EReadOpenBaoEnrollment(c *gin.Context) {
+	if e2eOpenBaoDirectory == "" {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(e2eOpenBaoDirectory, "openbao.json"))
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Data(http.StatusOK, "application/json", data)
 }
 
 // RouteE2ESeedUser is the handler for POST /__e2e__/seed-user

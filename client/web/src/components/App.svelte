@@ -1,6 +1,5 @@
 <script lang="ts">
 import { onMount } from 'svelte'
-
 import AuthAccessView from '$components/AuthAccessView.svelte'
 import AuthSetupView from '$components/AuthSetupView.svelte'
 import FreshPasswordPrompt from '$components/FreshPasswordPrompt.svelte'
@@ -37,7 +36,8 @@ import {
     wrapAnchorKey,
 } from '$lib/crypto-anchor'
 import { type WrappedKeyCache, withFreshKeys } from '$lib/fresh-unlock'
-import { ResponseNotOkError } from '$lib/request'
+import { type EnrollOpenBao, encryptOpenBaoBundle } from '$lib/openbao-enrollment'
+import { ResponseNotOkError, ThrowResponseNotOk } from '$lib/request'
 import { createUnlockWindow, type UnlockLease } from '$lib/unlock-window'
 import { base64UrlToBytes, bytesToBase64Url } from '$lib/utils'
 import {
@@ -251,10 +251,50 @@ function clearUnlockedKeys() {
     sessionPassword = null
 }
 
+const enrollOpenBao: EnrollOpenBao = async (plaintext, signal, progress) => {
+    const cancel = () => {
+        plaintext.fill(0)
+        passwordPrompt?.(null)
+        clearUnlockedKeys()
+    }
+    signal.addEventListener('abort', cancel, { once: true })
+    try {
+        signal.throwIfAborted()
+        await withFreshLocalKeys(
+            async (approvalGrant) => {
+                signal.throwIfAborted()
+                if (!primaryKey || !session) {
+                    throw new Error('Sign in again before enrolling OpenBao')
+                }
+                progress('encrypting')
+                const envelope = await encryptOpenBaoBundle(plaintext, primaryKey, session.userId, signal)
+                signal.throwIfAborted()
+                progress('saving')
+                const response = await fetch('/v2/auth/openbao-enrollment', {
+                    method: 'PUT',
+                    credentials: 'same-origin',
+                    cache: 'no-store',
+                    signal,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ envelope, approvalGrant }),
+                })
+                await ThrowResponseNotOk(response)
+            },
+            undefined,
+            'enroll-openbao',
+            signal
+        )
+    } finally {
+        signal.removeEventListener('abort', cancel)
+        plaintext.fill(0)
+    }
+}
+
 async function withFreshLocalKeys<T>(
     use: (grant: string) => Promise<T>,
     requestState?: string,
-    requestAction?: 'add-credential' | 'update-wrapped-key'
+    requestAction?: 'add-credential' | 'update-wrapped-key' | 'enroll-openbao',
+    signal?: AbortSignal
 ): Promise<T> {
     if (keyOperationBusy || !session || !sessionCredentialId || !wrappedKeyCache) {
         throw new Error('Finish the current verification before starting another action')
@@ -268,11 +308,14 @@ async function withFreshLocalKeys<T>(
     try {
         return await withFreshKeys({
             cache: wrappedKeyCache,
+            signal,
             requestState,
             requestAction,
             authorize: async () => {
+                signal?.throwIfAborted()
                 const active = await v2Session()
                 const activeCredentials = await v2ListCredentials()
+                signal?.throwIfAborted()
                 const credential = activeCredentials.find((item) => item.credentialId === sessionCredentialId)
                 if (
                     operationEpoch !== keyOperationEpoch ||
@@ -286,6 +329,7 @@ async function withFreshLocalKeys<T>(
             },
             getPassword: () =>
                 new Promise((resolve) => {
+                    signal?.throwIfAborted()
                     passwordPrompt = resolve
                 }),
             use: async (keys) => {
@@ -1546,6 +1590,7 @@ function sortedItems() {
             onDeletePasskey={doDeletePasskey}
             onDeleteSigningKey={doDeleteSigningKey}
             onDeriveSigningKey={doDeriveSigningKey}
+            onEnrollOpenBao={enrollOpenBao}
             onLogout={doLogout}
             onPublishSigningKey={doPublishSigningKey}
             onRegenerateRequestKey={doRegenerateRequestKey}

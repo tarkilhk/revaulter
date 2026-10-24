@@ -47,7 +47,7 @@ func validApprovalPurpose(state, action string) bool {
 	if state != "" {
 		return action == ""
 	}
-	return action == "" || action == "add-credential" || action == "update-wrapped-key"
+	return action == "enroll-openbao" || action == "" || action == "add-credential" || action == "update-wrapped-key"
 }
 
 func (s *Server) approvalIdentity(ctx context.Context, tx *db.DbTx, userID, credentialID, state, action string) (approvalBinding, error) {

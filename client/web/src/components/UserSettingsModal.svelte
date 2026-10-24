@@ -1,14 +1,15 @@
 <script lang="ts">
 import { formatDistanceToNowStrict } from 'date-fns'
 import { tick } from 'svelte'
-
 import AuditLogTab from '$components/AuditLogTab.svelte'
 import Button from '$components/Button.svelte'
 import Icon from '$components/Icon.svelte'
+import OpenBaoEnrollmentTab from '$components/OpenBaoEnrollmentTab.svelte'
 import RequestAuthTab from '$components/RequestAuthTab.svelte'
 import SigningKeysTab from '$components/SigningKeysTab.svelte'
 import TextField from '$components/TextField.svelte'
 import { generateUnlockSecret } from '$lib/crypto'
+import type { EnrollOpenBao } from '$lib/openbao-enrollment'
 
 import type {
     DerivedSigningKey,
@@ -18,7 +19,15 @@ import type {
     V2RequestOIDCIssuer,
 } from '$lib/v2-types'
 
-type SettingsTab = 'user' | 'request-auth' | 'ip-restrictions' | 'password' | 'passkeys' | 'signing-keys' | 'audit-log'
+type SettingsTab =
+    | 'openbao'
+    | 'user'
+    | 'request-auth'
+    | 'ip-restrictions'
+    | 'password'
+    | 'passkeys'
+    | 'signing-keys'
+    | 'audit-log'
 
 interface Props {
     keyProtection: 'prf' | 'bitwarden'
@@ -56,6 +65,7 @@ interface Props {
     onAddPasskey: (name: string, mode: 'prf' | 'bitwarden', secret: string) => Promise<void>
     onRenamePasskey: (id: string, name: string) => Promise<void>
     onDeletePasskey: (id: string) => Promise<void>
+    onEnrollOpenBao: EnrollOpenBao
     onDeriveSigningKey: (keyLabel: string, algorithm: string) => Promise<DerivedSigningKey>
     onPublishSigningKey: (derived: DerivedSigningKey) => Promise<void>
     onUnpublishSigningKey: (id: string) => Promise<void>
@@ -92,6 +102,7 @@ let {
     onAddPasskey,
     onRenamePasskey,
     onDeletePasskey,
+    onEnrollOpenBao,
     onDeriveSigningKey,
     onPublishSigningKey,
     onUnpublishSigningKey,
@@ -277,6 +288,7 @@ function formatTimestamp(value: number | string): string {
 
 const tabs: { id: SettingsTab; label: string; icon: string }[] = [
     { id: 'user', label: 'User', icon: 'user' },
+    { id: 'openbao', label: 'OpenBao', icon: 'lock-keyhole' },
     { id: 'request-auth', label: 'Request auth', icon: 'key-round' },
     { id: 'ip-restrictions', label: 'Firewall', icon: 'brick-wall-shield' },
     { id: 'password', label: 'Password', icon: 'lock-closed' },
@@ -378,6 +390,8 @@ const tabs: { id: SettingsTab; label: string; icon: string }[] = [
                         </div>
                     {/if}
                 </div>
+            {:else if activeTab === 'openbao'}
+                <OpenBaoEnrollmentTab onEnroll={onEnrollOpenBao} />
             {:else if activeTab === 'request-auth'}
                 <RequestAuthTab
                     {userId}

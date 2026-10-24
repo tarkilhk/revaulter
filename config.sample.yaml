@@ -1,3 +1,13 @@
+## openBaoEnrollmentPath (string)
+## Description:
+##   Absolute path of the encrypted OpenBao enrollment bundle
+#openBaoEnrollmentPath:
+
+## openBaoUrl (string)
+## Description:
+##   Fixed HTTPS origin of the OpenBao node
+#openBaoUrl:
+
 ## webhookUrl (string)
 ## Description:
 ##   Endpoint of the webhook, where notifications are sent to.

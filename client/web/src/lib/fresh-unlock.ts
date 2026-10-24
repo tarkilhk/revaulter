@@ -30,8 +30,9 @@ export interface FreshKeys {
 // A request unlock window may separately own a bounded copy of the returned primary key
 export async function withFreshKeys<T>(args: {
     cache: WrappedKeyCache
+    signal?: AbortSignal
     requestState?: string
-    requestAction?: 'add-credential' | 'update-wrapped-key'
+    requestAction?: 'add-credential' | 'update-wrapped-key' | 'enroll-openbao'
     authorize: () => Promise<void>
     getPassword: () => Promise<string | null>
     use: (keys: FreshKeys) => Promise<T>
@@ -47,32 +48,41 @@ export async function withFreshKeys<T>(args: {
     let anchor: AnchorKeyPair | null = null
     let password: string | undefined
     try {
+        args.signal?.throwIfAborted()
         await args.authorize()
+        args.signal?.throwIfAborted()
         const begin = await v2ApprovalBegin(cache.credentialId, args.requestState, args.requestAction)
+        args.signal?.throwIfAborted()
         if (begin.keyProtection !== cache.keyProtection || begin.wrappedKeyEpoch !== cache.wrappedKeyEpoch) {
             throw new Error('Credential protection changed; sign in again')
         }
         const assertion = await webauthnLoginWithPrf({
             challenge: begin.challenge,
+            signal: args.signal,
             options: begin.options,
             prfSalt: base64UrlToBytes(cache.basePrfSalt),
             requirePrf: cache.keyProtection === 'prf',
             evaluatePrf: cache.keyProtection === 'prf',
         })
         prfSecret = assertion.prfSecret
+        args.signal?.throwIfAborted()
         if (assertion.id !== cache.credentialId || (cache.keyProtection === 'prf' && !prfSecret)) {
             throw new Error('Use the passkey that signed in to approve this action')
         }
         const finish = await v2ApprovalFinish(begin.challengeId, (assertion.raw as { credential: unknown }).credential)
+        args.signal?.throwIfAborted()
         const envelope = parseWrappedPrimaryKeyEnvelope(cache.wrappedPrimaryKey)
         if (envelope.passwordRequired) {
             password = (await args.getPassword()) ?? undefined
+            args.signal?.throwIfAborted()
             if (!password) {
                 throw new Error('Approval canceled: password is required')
             }
         }
         // A session or credential can be revoked while the phone prompt is open
+        args.signal?.throwIfAborted()
         await args.authorize()
+        args.signal?.throwIfAborted()
         const derived = await deriveWrappingKey({
             prfSecret,
             keyProtection: cache.keyProtection,
@@ -84,6 +94,7 @@ export async function withFreshKeys<T>(args: {
         })
         wrappingKey = derived.wrappingKeyBytes
         stretched = derived.stretched
+        args.signal?.throwIfAborted()
         primaryKey = await unwrapPrimaryKey({
             wrapped: cache.wrappedPrimaryKey,
             keyProtection: cache.keyProtection,
@@ -91,6 +102,7 @@ export async function withFreshKeys<T>(args: {
             wrappingKeyBytes: wrappingKey,
             userId: cache.userId,
         })
+        args.signal?.throwIfAborted()
         if (cache.wrappedAnchorKey) {
             anchor = await unwrapAnchorKey({
                 wrapped: cache.wrappedAnchorKey,
@@ -98,6 +110,7 @@ export async function withFreshKeys<T>(args: {
                 userId: cache.userId,
             })
         }
+        args.signal?.throwIfAborted()
         return await args.use({
             primaryKey,
             prfSecret,
