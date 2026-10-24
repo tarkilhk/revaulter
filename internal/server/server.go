@@ -329,6 +329,8 @@ func (s *Server) initAppServer(log *slog.Logger) (err error) {
 	v2AuthGroup.POST("/login/begin", s.RouteV2AuthLoginBegin)
 	v2AuthGroup.POST("/login/finish", s.RouteV2AuthLoginFinish)
 	v2AuthGroup.GET("/session", sessionReadyMw, s.RouteV2AuthSession)
+	v2AuthGroup.GET("/openbao-enrollment", sessionReadyMw, s.RouteV2AuthOpenBaoEnrollmentStatus)
+	v2AuthGroup.PUT("/openbao-enrollment", sessionReadyMw, s.RouteV2AuthOpenBaoEnrollment)
 	v2AuthGroup.POST("/finalize-signup", sessionMw, s.RouteV2AuthFinalizeSignup)
 	v2AuthGroup.POST("/allowed-ips", sessionReadyMw, s.RouteV2AuthAllowedIPs)
 	v2AuthGroup.POST("/regenerate-request-key", sessionReadyMw, s.RouteV2AuthRequestKeyRegenerate)

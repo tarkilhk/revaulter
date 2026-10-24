@@ -176,6 +176,7 @@ export async function webauthnLoginWithPrf(args: {
     options?: unknown
     requirePrf?: boolean
     evaluatePrf?: boolean
+    signal?: AbortSignal
 }): Promise<{ id: string; signCount: number; prfSecret?: Uint8Array; raw?: unknown }> {
     const salt = args.prfSalt ?? generatePrfSalt()
     // Copy the view into a standalone ArrayBuffer because WebAuthn accepts BufferSource but the PRF type requires ArrayBuffer
@@ -225,6 +226,7 @@ export async function webauthnLoginWithPrf(args: {
 
     const assertion = (await navigator.credentials.get({
         publicKey: effectivePublicKey,
+        signal: args.signal,
     })) as PublicKeyCredential | null
 
     if (!assertion) {

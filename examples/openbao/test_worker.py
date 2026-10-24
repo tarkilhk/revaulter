@@ -75,32 +75,89 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaises(worker.WorkerError):
             worker.unseal(self.config, FakeBao(succeed=False), lambda _: self.bundle)
 
-    def test_cli_receives_only_ciphertext_and_secret_output_is_not_returned_as_status(self):
-        with tempfile.TemporaryDirectory() as directory:
-            envelope = Path(directory) / "ciphertext.json"
-            envelope.write_text(json.dumps({"kind": "revaulter/1", "algorithm": "A256GCM", "keyLabel": "openbao-unseal", "value": "dummy-ciphertext"}))
-            config = {**self.config, "revaulter_url": "https://approve.example", "envelope": str(envelope), "key_label": "openbao-unseal", "cli": "/opt/revaulter-cli", "request_key_file": "/etc/request-key", "trust_store": "/etc/trust.json"}
-            result = subprocess.CompletedProcess([], 0, json.dumps(self.bundle).encode(), b"dummy diagnostic")
-            with patch.object(worker.subprocess, "run", return_value=result) as run:
-                bundle = worker.decrypt_bundle(config)
-            command = run.call_args.args[0]
-            self.assertNotIn(self.bundle["shares"][0], str(command))
-            self.assertIn("--request-key-file", command)
-            self.assertIn("--trust-store", command)
-            self.assertNotIn("--no-trust-store", command)
-            self.assertNotIn("--insecure", command)
-            self.assertEqual(bundle, self.bundle)
+    def enrollment(self, directory):
+        encode = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        record = {
+            "version": 1, "userId": "owner", "target": "https://bao.example",
+            "updatedAt": "2026-10-24T00:00:00Z", "requestKey": "rvk_dummy",
+            "envelope": {"kind": "revaulter/1", "algorithm": "A256GCM", "keyLabel": "openbao-unseal",
+                         "value": encode(b"ciphertext"), "nonce": encode(bytes(12)), "tag": encode(bytes(16))},
+            "trust": {"entries": {"https://approve.example|owner": {
+                "anchorEs384PublicKey": "synthetic", "anchorMldsa87PublicKey": "synthetic",
+                "fingerprint": "synthetic", "firstSeen": "2026-10-24T00:00:00Z"}}},
+        }
+        path = Path(directory) / "enrollment.json"
+        path.write_text(json.dumps(record))
+        config = {**self.config, "revaulter_url": "https://approve.example", "enrollment_file": str(path),
+                  "cli": "/opt/revaulter-cli"}
+        return config, record, path
 
-    def test_cli_failure_does_not_expose_either_output_stream(self):
+    def test_cli_uses_private_ephemeral_credentials_and_only_ciphertext(self):
         with tempfile.TemporaryDirectory() as directory:
-            envelope = Path(directory) / "ciphertext.json"
-            envelope.write_text(json.dumps({"algorithm": "A256GCM", "keyLabel": "openbao-unseal"}))
-            config = {"revaulter_url": "https://approve.example", "envelope": str(envelope), "key_label": "openbao-unseal", "cli": "/opt/cli", "request_key_file": "/etc/request-key", "trust_store": "/etc/trust.json"}
+            config, record, _ = self.enrollment(directory)
+            paths = []
+            def invoke(command, **kwargs):
+                for flag in ("--request-key-file", "--trust-store"):
+                    path = Path(command[command.index(flag) + 1])
+                    paths.append(path)
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                    self.assertNotIn(self.bundle["shares"][0], path.read_text())
+                self.assertEqual(json.loads(kwargs["input"]), record["envelope"])
+                self.assertNotIn("--no-trust-store", command)
+                self.assertNotIn("--insecure", command)
+                return subprocess.CompletedProcess([], 0, json.dumps(self.bundle).encode(), b"")
+            with patch.object(worker.subprocess, "run", side_effect=invoke):
+                bundle = worker.decrypt_bundle(config)
+            self.assertEqual(bundle, self.bundle)
+            self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_cli_failure_cleans_credentials_and_hides_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self.enrollment(directory)
             result = subprocess.CompletedProcess([], 1, b"sensitive-dummy-output", b"sensitive-dummy-error")
-            with patch.object(worker.subprocess, "run", return_value=result):
+            with patch.object(worker.subprocess, "run", return_value=result) as run:
                 with self.assertRaises(worker.WorkerError) as error:
                     worker.decrypt_bundle(config)
             self.assertNotIn("sensitive-dummy", str(error.exception))
+            command = run.call_args.args[0]
+            self.assertFalse(Path(command[command.index("--request-key-file") + 1]).exists())
+
+    def test_replacement_routes_to_the_saving_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, record, path = self.enrollment(directory)
+            for user_id in ("first-user", "second-user"):
+                replacement = {**record, "userId": user_id, "requestKey": "rvk_" + user_id,
+                               "trust": {"entries": {"https://approve.example|" + user_id:
+                                         record["trust"]["entries"]["https://approve.example|owner"]}}}
+                path.write_text(json.dumps(replacement))
+                def invoke(command, **kwargs):
+                    key_path = Path(command[command.index("--request-key-file") + 1])
+                    trust_path = Path(command[command.index("--trust-store") + 1])
+                    self.assertEqual(key_path.read_text(), replacement["requestKey"])
+                    self.assertEqual(json.loads(trust_path.read_text()), replacement["trust"])
+                    return subprocess.CompletedProcess([], 0, json.dumps(self.bundle).encode(), b"")
+                with patch.object(worker.subprocess, "run", side_effect=invoke):
+                    self.assertEqual(worker.decrypt_bundle(config), self.bundle)
+
+    def test_mismatched_enrollment_is_rejected_before_cli(self):
+        changes = ({"userId": "other"}, {"target": "https://other.example"},
+                   {"trust": {"entries": {}}}, {"shares": ["plaintext"]},
+                   {"version": True})
+        with tempfile.TemporaryDirectory() as directory:
+            config, record, path = self.enrollment(directory)
+            for change in changes:
+                path.write_text(json.dumps({**record, **change}))
+                with patch.object(worker.subprocess, "run") as run:
+                    with self.assertRaises(worker.WorkerError):
+                        worker.decrypt_bundle(config)
+                    run.assert_not_called()
+            path.write_text(json.dumps(record).replace('"version": 1', '"version": 1, "version": 1'))
+            with self.assertRaises(worker.WorkerError):
+                worker.read_enrollment(config)
+            path.write_text(" " * 65537)
+            with self.assertRaises(worker.WorkerError):
+                worker.read_enrollment(config)
 
     def test_https_and_no_redirects(self):
         for origin in ("http://bao.example", "https://u:p@bao.example", "https://bao.example/path"):

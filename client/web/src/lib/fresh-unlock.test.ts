@@ -193,3 +193,46 @@ describe('explicit Bitwarden approval', () => {
         expect(mocks.unwrap).not.toHaveBeenCalled()
     })
 })
+
+describe('enrollment departure', () => {
+    it('does not open a late Bitwarden prompt after delayed verification completes', async () => {
+        const controller = new AbortController()
+        let release: (value: unknown) => void = () => {}
+        let entered: () => void = () => {}
+        const started = new Promise<void>((resolve) => {
+            entered = resolve
+        })
+        mocks.begin.mockResolvedValue({
+            challengeId: 'dummy',
+            challenge: 'AQID',
+            keyProtection: 'bitwarden',
+            wrappedKeyEpoch: 1,
+        })
+        mocks.parse.mockReturnValue({ passwordRequired: true })
+        mocks.passkey.mockImplementation((args) => {
+            expect(args.signal).toBe(controller.signal)
+            entered()
+            return new Promise((resolve) => {
+                release = resolve
+            })
+        })
+        const getPassword = vi.fn()
+        const use = vi.fn()
+        const operation = withFreshKeys({
+            cache: { ...cache, keyProtection: 'bitwarden' },
+            signal: controller.signal,
+            authorize: mocks.authorize,
+            getPassword,
+            use,
+        })
+        const rejection = expect(operation).rejects.toThrow()
+        await started
+        controller.abort()
+        release({ id: 'credential', raw: { credential: {} } })
+        await rejection
+        expect(getPassword).not.toHaveBeenCalled()
+        expect(mocks.finish).not.toHaveBeenCalled()
+        expect(mocks.unwrap).not.toHaveBeenCalled()
+        expect(use).not.toHaveBeenCalled()
+    })
+})

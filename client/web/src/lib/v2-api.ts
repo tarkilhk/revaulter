@@ -427,7 +427,7 @@ export async function* v2ListStream(
 export async function v2ApprovalBegin(
     credentialId: string,
     state?: string,
-    action?: 'add-credential' | 'update-wrapped-key'
+    action?: 'add-credential' | 'update-wrapped-key' | 'enroll-openbao'
 ) {
     const res = await Request<{
         challengeId: string

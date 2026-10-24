@@ -9,6 +9,8 @@ import base64
 import binascii
 import fcntl
 import json
+import os
+import tempfile
 import resource
 import ssl
 import subprocess
@@ -71,29 +73,91 @@ def require_target(status):
         raise WorkerError("Target must be an initialized OpenBao Shamir 2-of-3 node")
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise WorkerError("Enrollment contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def read_enrollment(config):
+    # Read one inode once so atomic enrollment replacement cannot mix generations
+    with open(config["enrollment_file"], "rb") as source:
+        data = source.read(65537)
+    if len(data) > 65536:
+        raise WorkerError("Enrollment is too large")
+    enrollment = json.loads(data, object_pairs_hook=unique_object)
+    if (not isinstance(enrollment, dict)
+            or set(enrollment) != {"version", "userId", "target", "envelope", "requestKey", "trust", "updatedAt"}
+            or type(enrollment["version"]) is not int or enrollment["version"] != 1
+            or not isinstance(enrollment["userId"], str) or not enrollment["userId"]
+            or enrollment["target"] != https_origin(config["openbao_url"])
+            or not isinstance(enrollment["requestKey"], str)
+            or not enrollment["requestKey"].startswith("rvk_")):
+        raise WorkerError("Enrollment does not match this worker")
+    envelope = enrollment["envelope"]
+    if (not isinstance(envelope, dict)
+            or set(envelope) != {"kind", "algorithm", "keyLabel", "value", "nonce", "tag"}
+            or envelope["kind"] != "revaulter/1"
+            or envelope["algorithm"] != "A256GCM"
+            or envelope["keyLabel"] != "openbao-unseal"):
+        raise WorkerError("Encrypted envelope is invalid")
+    for field, minimum, maximum in (("value", 1, 4096), ("nonce", 12, 12), ("tag", 16, 16)):
+        value = envelope[field]
+        if not isinstance(value, str):
+            raise WorkerError("Encrypted envelope is invalid")
+        try:
+            decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+        except (ValueError, binascii.Error):
+            raise WorkerError("Encrypted envelope is invalid") from None
+        if (not minimum <= len(decoded) <= maximum
+                or base64.urlsafe_b64encode(decoded).decode().rstrip("=") != value):
+            raise WorkerError("Encrypted envelope is invalid")
+    trust = enrollment["trust"]
+    expected_key = https_origin(config["revaulter_url"]) + "|" + enrollment["userId"]
+    if (not isinstance(trust, dict) or set(trust) != {"entries"}
+            or not isinstance(trust["entries"], dict)
+            or set(trust["entries"]) != {expected_key}):
+        raise WorkerError("Enrollment trust does not match this worker")
+    entry = trust["entries"][expected_key]
+    if (not isinstance(entry, dict)
+            or set(entry) != {"anchorEs384PublicKey", "anchorMldsa87PublicKey", "fingerprint", "firstSeen"}
+            or any(not isinstance(value, str) or not value for value in entry.values())):
+        raise WorkerError("Enrollment trust is invalid")
+    return enrollment
+
+
 def decrypt_bundle(config):
-    https_origin(config["revaulter_url"])
-    envelope_path = Path(config["envelope"])
-    envelope = json.loads(envelope_path.read_text())
-    if envelope.get("keyLabel") != config["key_label"] or envelope.get("algorithm") != "A256GCM":
-        raise WorkerError("Encrypted envelope does not match the configured key label and algorithm")
-    command = [
-        config["cli"], "decrypt", "--server", config["revaulter_url"],
-        "--request-key-file", config["request_key_file"],
-        "--trust-store", config["trust_store"],
-        "--json", "-", "--format", "raw", "--timeout", "5m",
-        "--note", "OpenBao unseal 2 of 3",
-    ]
-    try:
-        result = subprocess.run(
-            command, input=json.dumps(envelope).encode("ascii"),
-            capture_output=True, timeout=330, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        raise WorkerError("Approval failed or timed out") from None
+    enrollment = read_enrollment(config)
+    # Only the request credential and public trust pins reach these private files
+    # The CLI receives ciphertext on stdin and returns plaintext through a pipe
+    with tempfile.TemporaryDirectory(prefix="openbao-approval-") as directory:
+        request_key = Path(directory) / "request-key"
+        trust_store = Path(directory) / "trust.json"
+        for path, content in ((request_key, enrollment["requestKey"]),
+                              (trust_store, json.dumps(enrollment["trust"]))):
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="ascii") as output:
+                output.write(content)
+        command = [
+            config["cli"], "decrypt", "--server", https_origin(config["revaulter_url"]),
+            "--request-key-file", str(request_key),
+            "--trust-store", str(trust_store),
+            "--json", "-", "--format", "raw", "--timeout", "5m",
+            "--note", "OpenBao unseal 2 of 3",
+        ]
+        try:
+            result = subprocess.run(
+                command, input=json.dumps(enrollment["envelope"]).encode("ascii"),
+                capture_output=True, timeout=330, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            raise WorkerError("Approval failed or timed out") from None
     if result.returncode != 0:
         raise WorkerError("Approval denied, failed, or expired")
     try:
-        return json.loads(result.stdout)
+        return json.loads(result.stdout, object_pairs_hook=unique_object)
     except (ValueError, UnicodeError):
         raise WorkerError("Approved bundle is invalid") from None
 

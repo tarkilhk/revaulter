@@ -22,6 +22,12 @@ import (
 
 // Config is the struct containing configuration
 type Config struct {
+	// Absolute path of the encrypted OpenBao enrollment bundle
+	OpenBaoEnrollmentPath string `env:"OPENBAOENROLLMENTPATH" yaml:"openBaoEnrollmentPath"`
+
+	// Fixed HTTPS origin of the OpenBao node
+	OpenBaoURL string `env:"OPENBAOURL" yaml:"openBaoUrl"`
+
 	// Endpoint of the webhook, where notifications are sent to.
 	// Leave unset to disable webhook notifications.
 	WebhookUrl string `env:"WEBHOOKURL" yaml:"webhookUrl"`
@@ -277,6 +283,19 @@ func (c *Config) GetWebhookOpts(log *slog.Logger) webhook.NewWebhookOpts {
 
 // Validate the configuration and performs some sanitization
 func (c *Config) Validate(logger *slog.Logger) error {
+	// OpenBao enrollment is disabled unless all trusted settings are configured
+	if c.OpenBaoEnrollmentPath != "" || c.OpenBaoURL != "" {
+		if !filepath.IsAbs(c.OpenBaoEnrollmentPath) {
+			return errors.New("OpenBao enrollment requires an absolute openBaoEnrollmentPath")
+		}
+		for _, origin := range []string{c.OpenBaoURL, c.BaseUrl} {
+			u, err := url.Parse(origin)
+			if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+				return errors.New("OpenBao enrollment requires fixed HTTPS origins for openBaoUrl and baseUrl")
+			}
+		}
+	}
+
 	// Check required variables
 	if c.DatabaseDSN == "" {
 		return errors.New("config entry key 'databaseDSN' missing")

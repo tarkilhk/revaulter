@@ -298,3 +298,35 @@ func TestSetSecretKey(t *testing.T) {
 		require.Equal(t, "CPJB5Nriy3r1JzMy", kid)
 	})
 }
+
+func TestOpenBaoEnrollmentConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, target, base string
+		valid                    bool
+	}{
+		{"disabled", "", "", "https://approve.example", true},
+		{"complete", "/enrollment/openbao.json", "https://bao.example:8200", "https://approve.example", true},
+		{"missing target", "/enrollment/openbao.json", "", "https://approve.example", false},
+		{"missing path", "", "https://bao.example", "https://approve.example", false},
+		{"relative path", "openbao.json", "https://bao.example", "https://approve.example", false},
+		{"plaintext target", "/enrollment/openbao.json", "http://bao.example", "https://approve.example", false},
+		{"credentials", "/enrollment/openbao.json", "https://user:password@bao.example", "https://approve.example", false},
+		{"target path", "/enrollment/openbao.json", "https://bao.example/path", "https://approve.example", false},
+		{"missing base", "/enrollment/openbao.json", "https://bao.example", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := GetDefaultConfig()
+			cfg.DatabaseDSN = "sqlite://./test.db"
+			cfg.SecretKey = testSecretKey
+			cfg.BaseUrl = tc.base
+			cfg.OpenBaoEnrollmentPath = tc.path
+			cfg.OpenBaoURL = tc.target
+			err := cfg.Validate(nil)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
